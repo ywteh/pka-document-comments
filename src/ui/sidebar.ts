@@ -1,4 +1,4 @@
-import { App, Debouncer, ItemView, MarkdownView, Notice, TFile, WorkspaceLeaf, debounce, setIcon } from "obsidian";
+import { App, Debouncer, ItemView, MarkdownView, Notice, TFile, WorkspaceLeaf, debounce } from "obsidian";
 import { EditorView } from "@codemirror/view";
 import { ParsedComment } from "../format/types";
 import { anchorRange, parseComments } from "../format/parse";
@@ -20,35 +20,34 @@ export const COMMENTS_VIEW_TYPE = "document-comments-sidebar";
 export type SidebarDeps = {
 	app: App;
 	getAuthor: () => string;
-	showComments: () => boolean;
-	showResolved: () => boolean;
-	/** Flip the master comment toggle (mirrors the command/ribbon). */
-	toggleComments: () => void;
-	/** Flip the resolved-comments filter. */
-	toggleResolved: () => void;
-	/** Tell the plugin the panel mounted/unmounted, so the inline column can
-	 *  step aside (while open) or come back (once closed). */
-	onMountedChange: (open: boolean) => void;
 };
 
+/** Panel-local status filter — independent of the document's resolved setting. */
+type FilterMode = "open" | "resolved" | "all";
+
+const FILTERS: ReadonlyArray<{ mode: FilterMode; label: string }> = [
+	{ mode: "open", label: "Open" },
+	{ mode: "resolved", label: "Resolved" },
+	{ mode: "all", label: "All" },
+];
+
 /**
- * The "All discussions" panel: a dedicated side view listing every comment in
- * the active note as Notion-style cards. While it's open the inline floating
- * cards step aside (the plugin reads `onMountedChange`); the in-text highlights
- * stay. Edits route through the open editor when there is one (so they join its
- * undo history), else through `vault.process`.
+ * The "All discussions" panel: a dedicated side view listing the active note's
+ * comments as Notion-style cards, with an Open / Resolved / All status filter.
+ * While it's open the inline floating cards step aside (the plugin reads
+ * `onMountedChange`); the in-text highlights stay. Edits route through the open
+ * editor when there is one (so they join its undo history), else `vault.process`.
  */
 export class CommentsSidebarView extends ItemView {
 	private listEl!: HTMLElement;
 	private emptyEl!: HTMLElement;
 	private titleEl!: HTMLElement;
-	private countEl!: HTMLElement;
 	private cards = new Map<string, Card>();
 	private file: TFile | null = null;
 	private cb: CardCallbacks;
 	private scheduleRefresh: Debouncer<[], void>;
-	private commentsToggleAction: HTMLElement | null = null;
-	private resolvedToggleAction: HTMLElement | null = null;
+	private filter: FilterMode = "open";
+	private tabs: Array<{ mode: FilterMode; el: HTMLElement; countEl: HTMLElement }> = [];
 
 	constructor(
 		leaf: WorkspaceLeaf,
@@ -98,18 +97,20 @@ export class CommentsSidebarView extends ItemView {
 		root.addClass("dc-sidebar-view");
 
 		const header = root.createDiv("dc-sidebar__header");
-		this.titleEl = header.createSpan("dc-sidebar__title");
-		this.countEl = header.createSpan("dc-sidebar__count");
+		this.titleEl = header.createDiv("dc-sidebar__title");
+
+		// Panel-local status filter (Open / Resolved / All), each with a live count.
+		const tabs = header.createDiv("dc-sidebar__tabs");
+		this.tabs = FILTERS.map(({ mode, label }) => {
+			const el = tabs.createEl("button", { cls: "dc-sidebar__tab" });
+			el.createSpan({ text: label });
+			const countEl = el.createSpan({ cls: "dc-sidebar__tab-count" });
+			el.addEventListener("click", () => this.setFilter(mode));
+			return { mode, el, countEl };
+		});
 
 		this.listEl = root.createDiv("dc-sidebar");
 		this.emptyEl = root.createDiv("dc-sidebar__empty");
-
-		this.resolvedToggleAction = this.addAction("badge-check", "Show resolved comments", () =>
-			this.deps.toggleResolved(),
-		);
-		this.commentsToggleAction = this.addAction("eye", "Hide comments in document", () =>
-			this.deps.toggleComments(),
-		);
 
 		// Follow the active note, its content, and external edits.
 		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.scheduleRefresh()));
@@ -121,29 +122,33 @@ export class CommentsSidebarView extends ItemView {
 			}),
 		);
 
-		this.deps.onMountedChange(true);
 		await this.refresh();
 	}
 
 	async onClose(): Promise<void> {
 		for (const card of this.cards.values()) card.el.remove();
 		this.cards.clear();
-		this.deps.onMountedChange(false);
 	}
 
-	/** Public hook so the plugin can re-render after a settings toggle. */
+	/** Public hook so the plugin can re-render after an external change. */
 	requestRefresh(): void {
 		this.scheduleRefresh();
 	}
 
+	private setFilter(mode: FilterMode): void {
+		if (this.filter === mode) return;
+		this.filter = mode;
+		void this.refresh();
+	}
+
 	private async refresh(text?: string): Promise<void> {
 		this.file = this.resolveFile();
-		this.updateActions();
 
 		const file = this.file;
 		if (!file) {
 			this.renderComments([]);
-			this.setHeader(null, 0);
+			this.titleEl.setText("Comments");
+			this.paintTabs({ open: 0, resolved: 0, all: 0 });
 			this.setEmpty("Open a note to see its comments.");
 			return;
 		}
@@ -153,22 +158,38 @@ export class CommentsSidebarView extends ItemView {
 			data = text ?? (await this.currentText(file));
 		} catch {
 			this.renderComments([]);
-			this.setHeader(file.basename, 0);
+			this.titleEl.setText(file.basename);
+			this.paintTabs({ open: 0, resolved: 0, all: 0 });
 			this.setEmpty("Couldn't read this note.");
 			return;
 		}
 
-		const comments = parseComments(data).filter((c) => c.body);
-		this.renderComments(comments);
-		this.listEl.toggleClass("dc-hide-resolved", !this.deps.showResolved());
+		const all = parseComments(data).filter((c) => c.body);
+		const open = all.filter((c) => c.status !== "resolved");
+		const resolved = all.filter((c) => c.status === "resolved");
+		const shown = this.filter === "open" ? open : this.filter === "resolved" ? resolved : all;
 
-		const visible = this.deps.showResolved()
-			? comments.length
-			: comments.filter((c) => c.status !== "resolved").length;
-		this.setHeader(file.basename, visible);
-		if (comments.length === 0) this.setEmpty("No comments in this note yet.");
-		else if (visible === 0) this.setEmpty("Only resolved comments here — show them with the badge button above.");
-		else this.setEmpty(null);
+		this.titleEl.setText(file.basename);
+		this.paintTabs({ open: open.length, resolved: resolved.length, all: all.length });
+		this.renderComments(shown);
+		this.setEmpty(this.emptyMessage(all.length, shown.length));
+	}
+
+	private emptyMessage(total: number, shown: number): string | null {
+		if (shown > 0) return null;
+		if (total === 0) return "No comments in this note yet.";
+		if (this.filter === "open") return "No open comments.";
+		if (this.filter === "resolved") return "No resolved comments.";
+		return "Nothing to show.";
+	}
+
+	private paintTabs(counts: Record<FilterMode, number>): void {
+		for (const tab of this.tabs) {
+			const active = tab.mode === this.filter;
+			tab.el.toggleClass("is-active", active);
+			tab.el.setAttribute("aria-pressed", active ? "true" : "false");
+			tab.countEl.setText(String(counts[tab.mode]));
+		}
 	}
 
 	private renderComments(comments: ParsedComment[]): void {
@@ -196,33 +217,9 @@ export class CommentsSidebarView extends ItemView {
 		if (!sameOrder) for (const el of desired) this.listEl.appendChild(el);
 	}
 
-	private setHeader(name: string | null, count: number): void {
-		this.titleEl.setText(name ?? "Comments");
-		this.countEl.setText(name ? String(count) : "");
-	}
-
 	private setEmpty(message: string | null): void {
 		this.emptyEl.toggleClass("is-hidden", message === null);
 		this.emptyEl.setText(message ?? "");
-	}
-
-	private updateActions(): void {
-		if (this.commentsToggleAction) {
-			const on = this.deps.showComments();
-			setIcon(this.commentsToggleAction, on ? "eye" : "eye-off");
-			this.commentsToggleAction.setAttribute(
-				"aria-label",
-				on ? "Hide comments in document" : "Show comments in document",
-			);
-		}
-		if (this.resolvedToggleAction) {
-			const on = this.deps.showResolved();
-			setIcon(this.resolvedToggleAction, on ? "badge-check" : "badge");
-			this.resolvedToggleAction.setAttribute(
-				"aria-label",
-				on ? "Hide resolved comments" : "Show resolved comments",
-			);
-		}
 	}
 
 	// ── Edits ──────────────────────────────────────────────────────────────

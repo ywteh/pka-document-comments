@@ -373,8 +373,7 @@ body {
 /* ── "All discussions" sidebar panel ───────────────────────────────────── */
 .dc-sidebar__header {
 	display: flex;
-	align-items: baseline;
-	justify-content: space-between;
+	flex-direction: column;
 	gap: 8px;
 	padding-bottom: 8px;
 	border-bottom: 1px solid var(--background-modifier-border);
@@ -386,17 +385,46 @@ body {
 	text-overflow: ellipsis;
 	white-space: nowrap;
 }
-.dc-sidebar__count {
-	flex: 0 0 auto;
-	padding: 1px 8px;
-	border-radius: 10px;
+/* Segmented Open / Resolved / All status filter. */
+.dc-sidebar__tabs {
+	display: flex;
+	gap: 2px;
+	padding: 2px;
+	border-radius: var(--radius-m, 8px);
 	background-color: var(--background-secondary);
+}
+.dc-sidebar__tab {
+	display: inline-flex;
+	flex: 1;
+	align-items: center;
+	justify-content: center;
+	gap: 5px;
+	height: 26px;
+	padding: 0 6px;
+	border: none;
+	/* Concentric with the track: inner radius = outer radius − track padding (2px). */
+	border-radius: calc(var(--radius-m, 8px) - 2px);
+	background: transparent;
 	color: var(--text-muted);
 	font-size: var(--font-smaller);
+	line-height: 1;
+	box-shadow: none;
+	cursor: pointer;
+}
+.dc-sidebar__tab:hover {
+	color: var(--text-normal);
+}
+.dc-sidebar__tab.is-active {
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	box-shadow: var(--shadow-s);
+}
+.dc-sidebar__tab-count {
+	color: var(--text-faint);
 	font-variant-numeric: tabular-nums;
 }
-.dc-sidebar__count:empty {
-	display: none;
+.dc-sidebar__tab.is-active .dc-sidebar__tab-count {
+	color: var(--text-muted);
 }
 
 .dc-sidebar {
@@ -412,9 +440,6 @@ body {
 	left: auto;
 	right: auto;
 	width: 100%;
-}
-.dc-sidebar.dc-hide-resolved .doc-comment-card.is-resolved {
-	display: none;
 }
 
 .dc-sidebar__empty {

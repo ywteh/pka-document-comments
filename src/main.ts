@@ -49,11 +49,6 @@ export default class DocCommentsPlugin extends Plugin {
 		const sidebarDeps: SidebarDeps = {
 			app: this.app,
 			getAuthor: () => this.authorName(),
-			showComments: () => this.settings.showComments,
-			showResolved: () => this.settings.showResolved,
-			toggleComments: () => void this.toggleComments(),
-			toggleResolved: () => void this.toggleResolved(),
-			onMountedChange: (open) => this.setSidebarOpen(open),
 		};
 		this.registerView(COMMENTS_VIEW_TYPE, (leaf) => new CommentsSidebarView(leaf, sidebarDeps));
 
@@ -61,8 +56,25 @@ export default class DocCommentsPlugin extends Plugin {
 			highlightPostProcessor(el, ctx);
 			this.scheduleReadingRefresh();
 		});
-		this.registerEvent(this.app.workspace.on("layout-change", () => this.scheduleReadingRefresh()));
-		this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.scheduleReadingRefresh()));
+		// layout-change / active-leaf-change fire for every way the panel shows or
+		// hides — open, close, collapse the dock, switch tabs — so the inline column
+		// follows the panel's real visibility instead of a mount flag that misses
+		// collapse/tab-switch.
+		this.registerEvent(
+			this.app.workspace.on("layout-change", () => {
+				this.syncSidebarOpen();
+				this.scheduleReadingRefresh();
+			}),
+		);
+		this.registerEvent(
+			this.app.workspace.on("active-leaf-change", () => {
+				this.syncSidebarOpen();
+				this.scheduleReadingRefresh();
+			}),
+		);
+		// resize fires while a dock collapses/expands — catches that case promptly
+		// even if layout-change doesn't.
+		this.registerEvent(this.app.workspace.on("resize", () => this.syncSidebarOpen()));
 		this.registerEvent(this.app.vault.on("modify", () => this.scheduleReadingRefresh()));
 
 		this.addCommand({
@@ -206,6 +218,7 @@ export default class DocCommentsPlugin extends Plugin {
 				await leaf.setViewState({ type: COMMENTS_VIEW_TYPE, active: true });
 			}
 			await workspace.revealLeaf(leaf);
+			this.syncSidebarOpen();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "unknown error";
 			new Notice(`Couldn't open the comments sidebar: ${message}`);
@@ -218,11 +231,28 @@ export default class DocCommentsPlugin extends Plugin {
 		return leaf?.view instanceof CommentsSidebarView ? leaf.view : null;
 	}
 
-	/** The panel reports mount/unmount here; the inline column follows. */
-	private setSidebarOpen(open: boolean): void {
-		if (this.sidebarOpen === open) return;
+	/** Recompute whether the comments panel is actually visible and, when that
+	 *  changes, refresh editors so the inline column steps aside / comes back.
+	 *  Visibility — not mere existence — is what matters: a collapsed dock or a
+	 *  hidden tab must bring the inline cards back. */
+	private syncSidebarOpen(): void {
+		const open = this.isSidebarVisible();
+		if (open === this.sidebarOpen) return;
 		this.sidebarOpen = open;
 		this.refreshEditors();
+	}
+
+	private isSidebarVisible(): boolean {
+		const { workspace } = this.app;
+		return workspace.getLeavesOfType(COMMENTS_VIEW_TYPE).some((leaf) => {
+			// A collapsed dock flips `.collapsed` immediately; the DOM width animates,
+			// so an offsetParent/size check alone lags a frame and misses the change.
+			const root = leaf.getRoot();
+			if (root === workspace.leftSplit && workspace.leftSplit.collapsed) return false;
+			if (root === workspace.rightSplit && workspace.rightSplit.collapsed) return false;
+			// Not in a collapsed dock — visible unless it's a hidden background tab.
+			return leaf.view.containerEl.offsetParent !== null;
+		});
 	}
 
 	onunload(): void {
