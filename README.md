@@ -2,6 +2,8 @@
 
 Notion / Linear-style **margin comments** for Obsidian — except the comments live **inside the markdown file**, stored as HTML comments. They render as floating cards in the right margin, but any other tool or AI agent that reads the raw `.md` sees them in context (a comment-free editor, a `git diff`, or an LLM all read the same thing).
 
+![Document Comments — threaded comment cards in the right margin of an Obsidian note](screenshot.png)
+
 > **Status:** early beta (v0.1.0), desktop-only, **not in the community plugin store yet**. Install via BRAT or manually — see [Install](#install).
 
 ## Features
