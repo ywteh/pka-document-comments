@@ -11,6 +11,8 @@ Notion / Linear-style **margin comments** for Obsidian — except the comments l
 - **Inline storage.** Comments are plain HTML comments in the file — invisible in Reading view and in other markdown renderers, and legible to agents/tools that read the raw text.
 - **Margin cards** in Live Preview, Source, and Reading view, aligned to the highlighted text. Click a card to jump to its anchor; hover to light it up.
 - **Threads, resolve / reopen, emoji reactions, edit & delete** — every action is a plain edit to the markdown, so it round-trips cleanly.
+- **Markdown in comment text** — code spans, bold, links, lists, etc. render in the cards (margin and sidebar).
+- **Long comments collapse** to a *Show more* preview; a thread taller than the screen opens in the sidebar instead.
 - **Inline composer.** Select text → command or right-click → a draft card opens in the margin (no modal).
 - **"All discussions" sidebar** — a panel listing the active note's comments with **Open / Resolved / All** filter tabs; while it's open the inline cards step aside (the in-text highlights stay).
 - **Toggle comments** on/off (also hides the text highlights), and **hide resolved** comments by default.
@@ -80,6 +82,7 @@ No network use, no telemetry, no accounts. Everything stays in your vault.
 
 - **Desktop-only** for now — the margin column needs the horizontal space. A mobile / narrow-screen layout is planned.
 - Comments whose highlighted text **overlaps** another comment's are stored fine but are a rough edge; avoid stacking comments on the same words for now.
+- In **Live Preview**, the highlight doesn't show on text inside a **table** (Obsidian renders tables as a self-contained widget the highlight can't reach). The comment and its card still work, and the highlight shows in **Reading view** and **Source mode**.
 
 ## Development
 

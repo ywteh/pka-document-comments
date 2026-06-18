@@ -17,7 +17,6 @@ import {
 import { cssEscape } from "../util/css";
 
 const CARD_GAP = 8;
-const ORPHAN_TOP = 8;
 
 export type ReadingDeps = {
 	app: App;
@@ -26,6 +25,8 @@ export type ReadingDeps = {
 	showResolved: () => boolean;
 	/** While the sidebar panel is open, the inline column steps aside. */
 	sidebarOpen: () => boolean;
+	/** Reveal a thread in the sidebar — used by a margin card too tall to fit. */
+	openInSidebar?: (id: string) => void;
 };
 
 /** A margin column for one reading-view container, aligned to highlight spans. */
@@ -41,6 +42,8 @@ class ReadingMargin {
 	private cb: CardCallbacks;
 	private scrollHandler = () => this.position();
 	private resizeObserver: ResizeObserver;
+	private animFrames = 0;
+	private animatingLoop = false;
 
 	constructor(
 		private readingView: HTMLElement,
@@ -52,8 +55,10 @@ class ReadingMargin {
 		this.cb = {
 			getAuthor: () => deps.getAuthor(),
 			onHover: (id, active) => this.setActive(active ? id : null),
-			onClickAnchor: (id) => this.scrollToAnchor(id),
+			onClickAnchor: (id) => this.flashAnchor(id),
 			onResize: () => this.position(),
+			animateLayout: () => this.animateLayout(),
+			revealComposer: (id) => this.revealComposer(id),
 			reply: (id, text) =>
 				void this.edit((doc) =>
 					computeAppendReply(doc, id, {
@@ -68,6 +73,7 @@ class ReadingMargin {
 			deleteEntry: (id, index) => void this.edit((doc) => computeDeleteEntry(doc, id, index)),
 			toggleReaction: (id, emoji) =>
 				void this.edit((doc) => computeToggleReaction(doc, id, emoji, deps.getAuthor())),
+			openInSidebar: (id) => deps.openInSidebar?.(id),
 		};
 
 		this.scroller.addEventListener("scroll", this.scrollHandler, { passive: true });
@@ -115,15 +121,17 @@ class ReadingMargin {
 		const present = new Set(this.comments.map((c) => c.id));
 		for (const [id, card] of this.cards) {
 			if (!present.has(id)) {
+				card.destroy();
 				card.el.remove();
 				this.cards.delete(id);
 				if (this.activeId === id) this.activeId = null;
 			}
 		}
+		const cardView = { app: this.deps.app, sourcePath: () => this.view.file?.path ?? "", collapsible: true };
 		for (const c of this.comments) {
 			const existing = this.cards.get(c.id);
 			if (!existing) {
-				const card = new Card(c, this.cb);
+				const card = new Card(c, this.cb, cardView);
 				this.cards.set(c.id, card);
 				this.container.appendChild(card.el);
 			} else if (existing.signature !== cardSignature(c)) {
@@ -158,8 +166,10 @@ class ReadingMargin {
 		if (this.draftEl && this.draftAnchor) {
 			placements.push({ el: this.draftEl, top: this.draftAnchor.getBoundingClientRect().top - topRef });
 		}
+		// First card floor is -Infinity so a card whose anchor has scrolled above the
+		// viewport slides off the top instead of sticking. (No orphan column here.)
 		placements.sort((a, b) => a.top - b.top);
-		let cursor = ORPHAN_TOP;
+		let cursor = Number.NEGATIVE_INFINITY;
 		for (const p of placements) {
 			const y = Math.max(p.top, cursor);
 			p.el.setCssStyles({ top: `${y}px` });
@@ -293,13 +303,47 @@ class ReadingMargin {
 			.forEach((s) => s.classList.toggle("is-active", active));
 	}
 
-	private scrollToAnchor(id: string): void {
+	/** Clicking a margin card flashes its highlighted text — no scroll (it's aligned). */
+	private flashAnchor(id: string): void {
+		this.setActive(id);
 		const span = this.scroller.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
 		if (!span) return;
-		span.scrollIntoView({ block: "center", behavior: "smooth" });
-		this.setActive(id);
 		span.classList.add("dc-flash");
 		window.setTimeout(() => span.classList.remove("dc-flash"), 900);
+	}
+
+	/** Scroll the reading view the minimum needed to reveal a just-opened composer. */
+	private revealComposer(id: string): void {
+		const card = this.cards.get(id);
+		if (!card) return;
+		window.requestAnimationFrame(() => {
+			const box = card.el.querySelector(".dc-field--composer");
+			if (!(box instanceof HTMLElement)) return;
+			const c = box.getBoundingClientRect();
+			const s = this.scroller.getBoundingClientRect();
+			let delta = 0;
+			if (c.bottom > s.bottom) delta = c.bottom - s.bottom + 12;
+			else if (c.top < s.top) delta = c.top - s.top - 12;
+			if (delta) this.scroller.scrollTop += delta;
+		});
+	}
+
+	/** Drive the stacking for a few frames so neighbors follow a card's open/close
+	 *  height animation smoothly (mirrors the editor margin). */
+	private animateLayout(): void {
+		this.animFrames = 14;
+		this.position();
+		if (this.animatingLoop) return;
+		this.animatingLoop = true;
+		const tick = (): void => {
+			this.position();
+			if (this.animFrames-- > 0) {
+				window.requestAnimationFrame(tick);
+			} else {
+				this.animatingLoop = false;
+			}
+		};
+		window.requestAnimationFrame(tick);
 	}
 
 	private onMouseOver = (e: MouseEvent): void => {
@@ -332,6 +376,7 @@ class ReadingMargin {
 		// The container we own goes away; the state classes sit on Obsidian's
 		// reading-view element, so clear them explicitly to avoid leaving it capped.
 		this.readingView.removeClasses(["dc-has", "dc-highlights", "dc-hide-resolved"]);
+		for (const card of this.cards.values()) card.destroy();
 		this.container.remove();
 		this.cards.clear();
 	}

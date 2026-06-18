@@ -1,21 +1,46 @@
-import { Menu, setIcon } from "obsidian";
+import { App, Component, MarkdownRenderer, Menu, setIcon } from "obsidian";
 import { ParsedComment } from "../format/types";
 import { isAnchored } from "../format/parse";
 
 const QUICK_EMOJI = ["👍", "❤️", "😄", "🎉", "😮", "👀", "🙏"];
 
+// A margin card whose thread is taller than this collapses to a "Show more" preview
+// (Notion-style), so a long comment never dominates the column or runs off the
+// bottom edge. Keep in sync with the .dc-card-clip max-height in styles.css.
+const CLAMP_HEIGHT = 220;
+
 export type CardCallbacks = {
 	getAuthor: () => string;
 	onHover: (id: string, active: boolean) => void;
 	onClickAnchor: (id: string) => void;
-	/** The card changed height (open/close, edit, react) — re-run the stacking pass. */
+	/** The card changed height (open/close, edit, react, expand) — re-run stacking. */
 	onResize: () => void;
+	/** Like onResize, but for an animated height change: track the grow/shrink for a
+	 *  few frames so neighbors follow it smoothly. Falls back to onResize when absent. */
+	animateLayout?: () => void;
 	reply: (id: string, text: string) => void;
 	setResolved: (id: string, resolved: boolean) => void;
 	remove: (id: string) => void;
 	editEntry: (id: string, index: number, text: string) => void;
 	deleteEntry: (id: string, index: number) => void;
 	toggleReaction: (id: string, emoji: string) => void;
+	/** Bring a just-opened reply composer fully into view (the margin scrolls the
+	 *  editor minimally; the sidebar scrolls its own list). */
+	revealComposer?: (id: string) => void;
+	/** Reveal this thread in the comments sidebar — the escape for a card too tall to
+	 *  fit the margin even when expanded. Absent for cards already in the sidebar. */
+	openInSidebar?: (id: string) => void;
+};
+
+/** Per-view context a card needs to render comment text as Markdown. */
+export type CardView = {
+	/** App handle for MarkdownRenderer; absent in unit tests → plain-text fallback. */
+	app?: App;
+	/** Source note path, for resolving links/embeds in rendered comment text. */
+	sourcePath: () => string;
+	/** Collapse a tall card to a "Show more" preview. Margin only — the sidebar
+	 *  scrolls its list, so sidebar cards stay full height. */
+	collapsible?: boolean;
 };
 
 /** A single margin comment card with the full Notion-style interaction set. */
@@ -25,20 +50,35 @@ export class Card {
 	private open = false;
 	private editingIndex = -1;
 	private draft = "";
+	/** Measured: the thread exceeds the clamp height / the whole column. */
+	private overflows = false;
+	private tooTall = false;
+	private clipEl: HTMLElement | null = null;
+	private threadEl: HTMLElement | null = null;
+	private footEl: HTMLElement | null = null;
+	/** Owns the child components MarkdownRenderer attaches (link/embed handlers). */
+	private md = new Component();
+	/** Re-measures overflow when the (async-rendered) content settles or changes. */
+	private ro = new ResizeObserver(() => this.measure());
 
 	constructor(
 		comment: ParsedComment,
 		private cb: CardCallbacks,
+		private view: CardView,
 	) {
 		this.comment = comment;
+		this.md.load();
 		this.el = createDiv("doc-comment-card");
 		this.el.addEventListener("mouseenter", () => this.cb.onHover(this.id, true));
 		this.el.addEventListener("mouseleave", () => this.cb.onHover(this.id, false));
 		this.el.addEventListener("mousedown", (e) => {
 			const target = e.target as HTMLElement;
-			if (target.closest("button, textarea, .dc-reaction, .dc-pop")) return;
+			if (target.closest("button, textarea, a, .dc-foot-btn, .dc-reaction, .dc-pop")) return;
 			this.cb.onClickAnchor(this.id);
-			this.setOpen(true);
+			// A thread too tall for the margin opens in the sidebar instead of expanding
+			// into a full-height card whose bottom you can't scroll to.
+			if (this.tooTall && this.cb.openInSidebar) this.cb.openInSidebar(this.id);
+			else this.setOpen(true);
 		});
 		this.render();
 	}
@@ -57,17 +97,27 @@ export class Card {
 		this.render();
 	}
 
+	/** Release the markdown-render component (its link/embed child handlers) when
+	 *  the card is dropped from the margin or sidebar. */
+	destroy(): void {
+		this.ro.disconnect();
+		this.md.unload();
+	}
+
 	setActive(active: boolean): void {
 		this.el.toggleClass("is-active", active);
 	}
 
 	private setOpen(open: boolean): void {
 		if (this.open === open) return;
+		const fromHeight = this.clipEl?.offsetHeight ?? 0;
 		this.open = open;
 		this.render();
-		this.cb.onResize();
+		this.animateClip(fromHeight);
+		(this.cb.animateLayout ?? this.cb.onResize)();
 		if (open) {
 			this.el.ownerDocument.addEventListener("mousedown", this.onDocMouseDown, true);
+			this.cb.revealComposer?.(this.id);
 			this.focusComposer();
 		} else {
 			this.el.ownerDocument.removeEventListener("mousedown", this.onDocMouseDown, true);
@@ -78,16 +128,112 @@ export class Card {
 		if (!this.el.contains(e.target as Node)) this.setOpen(false);
 	};
 
+	/** Quick, smooth grow/shrink of the body on open/close: animate the clip from its
+	 *  previous height to the new target, then drop the inline overrides so it's free
+	 *  to resize naturally again. */
+	private animateClip(fromHeight: number): void {
+		const clip = this.clipEl;
+		if (!clip || !this.view.collapsible) return;
+		const toHeight = this.open ? clip.scrollHeight : CLAMP_HEIGHT;
+		if (Math.abs(fromHeight - toHeight) < 2) return;
+		clip.setCssStyles({ overflow: "hidden", transition: "none", maxHeight: `${fromHeight}px` });
+		void clip.offsetHeight; // reflow so the start height is committed before transitioning
+		clip.setCssStyles({ transition: "max-height 150ms ease", maxHeight: `${toHeight}px` });
+		const cleanup = (): void => {
+			clip.setCssStyles({ maxHeight: "", overflow: "", transition: "" });
+			clip.removeEventListener("transitionend", cleanup);
+			window.clearTimeout(timer);
+		};
+		const timer = window.setTimeout(cleanup, 260); // fallback if transitionend never fires
+		clip.addEventListener("transitionend", cleanup);
+	}
+
 	private render(): void {
 		const c = this.comment;
 		this.el.empty();
 		this.el.toggleClass("is-resolved", c.status === "resolved");
 		this.el.toggleClass("is-open", this.open);
 
-		const thread = this.el.createDiv("dc-thread");
+		// The thread lives in a clip wrapper that gets a max-height when a tall card is
+		// collapsed; the footer (Show more / Open in sidebar) sits outside the clip.
+		const clip = this.el.createDiv("dc-card-clip");
+		this.clipEl = clip;
+		const thread = clip.createDiv("dc-thread");
+		this.threadEl = thread;
 		c.thread.forEach((entry, i) => this.renderEntry(thread, entry, i));
+		if (this.open) this.renderComposer(clip);
 
-		if (this.open) this.renderComposer();
+		this.footEl = this.el.createDiv("dc-card-foot");
+		this.applyClampState();
+
+		// Re-measure once the (async Markdown) content settles, and on later changes.
+		// The card may not be in the DOM yet during construction; the observer fires
+		// when it attaches and is sized.
+		if (this.view.collapsible) {
+			this.ro.disconnect();
+			this.ro.observe(thread);
+		}
+	}
+
+	/** Recompute whether the thread overflows the clamp / the whole column, and
+	 *  reflect it. Cheap; driven by the ResizeObserver as content settles or changes. */
+	private measure(): void {
+		if (!this.threadEl || !this.view.collapsible) return;
+		const content = this.threadEl.offsetHeight;
+		const overflows = content > CLAMP_HEIGHT;
+		const viewport = this.el.parentElement?.clientHeight ?? 0;
+		const tooTall = viewport > 0 && content > viewport - 24;
+		if (overflows === this.overflows && tooTall === this.tooTall) return;
+		this.overflows = overflows;
+		this.tooTall = tooTall;
+		this.applyClampState();
+		this.cb.onResize(); // clamping changes the card height → restack
+	}
+
+	/** Apply the collapse state to the DOM: clamp the body when a tall card is at
+	 *  rest, and render the Show more / Show less / Open-in-sidebar footer. */
+	private applyClampState(): void {
+		this.clipEl?.toggleClass("dc-clamped", !!this.view.collapsible && !this.open && this.overflows);
+		const foot = this.footEl;
+		if (!foot) return;
+		foot.empty();
+		if (this.view.collapsible) {
+			if (this.tooTall && this.cb.openInSidebar) {
+				// Too tall to read in the margin at all (expanding gives an unreachable
+				// full-height card), so the affordance is "open in sidebar" directly — on
+				// the always-reachable collapsed card.
+				this.footButton(foot, "Open in sidebar →", "", () => this.cb.openInSidebar?.(this.id));
+			} else if (!this.open && this.overflows) {
+				// "Show more" opens the card — full thread + reply field in one click, so
+				// there's no second click to reveal the composer. Collapse by clicking away.
+				this.footButton(foot, "Show more", "", () => this.setOpen(true));
+			}
+		}
+		// Collapsed "Show more" is a centered overlay at the card's bottom (over the
+		// faded text); "Open in sidebar" (when open) is a normal centered footer.
+		foot.toggleClass("dc-foot-overlay", !!this.view.collapsible && !this.open && this.overflows);
+		foot.toggleClass("is-empty", foot.childElementCount === 0);
+	}
+
+	/** A subtle, Notion-style text affordance. A <span> (not an Obsidian <button>) so
+	 *  no theme can give it chip chrome; role+tabindex keep it keyboard-accessible. */
+	private footButton(parent: HTMLElement, text: string, extraClass: string, onClick: () => void): void {
+		const btn = parent.createEl("span", {
+			cls: extraClass ? `dc-foot-btn ${extraClass}` : "dc-foot-btn",
+			text,
+			attr: { role: "button", tabindex: "0" },
+		});
+		const fire = (e: Event) => {
+			e.stopPropagation();
+			onClick();
+		};
+		btn.addEventListener("click", fire);
+		btn.addEventListener("keydown", (e) => {
+			if (e.key === "Enter" || e.key === " ") {
+				e.preventDefault();
+				fire(e);
+			}
+		});
 	}
 
 	private renderEntry(
@@ -115,10 +261,20 @@ export class Card {
 		if (this.editingIndex === i) {
 			this.renderEditor(row, entry.text, i);
 		} else {
-			row.createDiv({ cls: "dc-entry__text", text: entry.text });
+			this.renderText(row.createDiv("dc-entry__text"), entry.text);
 		}
 
 		if (i === 0 && this.comment.reactions.length > 0) this.renderReactions(row);
+	}
+
+	/** Render comment text as Markdown (code spans, links, lists, …). Falls back to
+	 *  plain text when no App is available (unit tests). */
+	private renderText(el: HTMLElement, text: string): void {
+		if (this.view.app) {
+			void MarkdownRenderer.render(this.view.app, text, el, this.view.sourcePath(), this.md);
+		} else {
+			el.setText(text);
+		}
 	}
 
 	private renderReactions(parent: HTMLElement): void {
@@ -168,8 +324,8 @@ export class Card {
 		});
 	}
 
-	private renderComposer(): void {
-		const box = this.el.createDiv("dc-field dc-field--composer");
+	private renderComposer(parent: HTMLElement): void {
+		const box = parent.createDiv("dc-field dc-field--composer");
 		const ta = box.createEl("textarea", {
 			cls: "dc-field__input",
 			attr: { placeholder: "Reply…", rows: "1" },
@@ -270,8 +426,8 @@ export class Card {
 
 	private focusComposer(): void {
 		window.setTimeout(() => {
-			const ta = this.el.querySelector(".dc-composer__input");
-			if (ta instanceof HTMLTextAreaElement) ta.focus();
+			const ta = this.el.querySelector(".dc-field--composer .dc-field__input");
+			if (ta instanceof HTMLTextAreaElement) ta.focus({ preventScroll: true });
 		}, 0);
 	}
 }

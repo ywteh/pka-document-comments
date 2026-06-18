@@ -25,10 +25,12 @@ export default class DocCommentsPlugin extends Plugin {
 			commentField,
 			draftField,
 			commentConfig.of({
+				app: this.app,
 				author: () => this.authorName(),
 				showComments: () => this.settings.showComments,
 				showResolved: () => this.settings.showResolved,
 				sidebarOpen: () => this.sidebarOpen,
+				openInSidebar: (id) => void this.revealComment(id),
 			}),
 			// Reflects dc-has / dc-highlights / dc-hide-resolved onto .cm-editor so the
 			// stylesheet caps the text column without a :has() selector.
@@ -44,6 +46,7 @@ export default class DocCommentsPlugin extends Plugin {
 			showComments: () => this.settings.showComments,
 			showResolved: () => this.settings.showResolved,
 			sidebarOpen: () => this.sidebarOpen,
+			openInSidebar: (id) => void this.revealComment(id),
 		};
 		this.readingManager = new ReadingMarginManager(readingDeps);
 		this.scheduleReadingRefresh = debounce(() => this.readingManager?.refresh(), 50, true);
@@ -227,6 +230,13 @@ export default class DocCommentsPlugin extends Plugin {
 			const message = error instanceof Error ? error.message : "unknown error";
 			new Notice(`Couldn't open the comments sidebar: ${message}`);
 		}
+	}
+
+	/** Open the sidebar and scroll it to a thread — the escape from a margin card too
+	 *  tall to fit the column even when expanded. */
+	private async revealComment(id: string): Promise<void> {
+		await this.activateSidebar();
+		await this.sidebarView()?.revealComment(id);
 	}
 
 	/** The live sidebar view instance, if the panel is open. */

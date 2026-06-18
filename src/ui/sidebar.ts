@@ -62,6 +62,7 @@ export class CommentsSidebarView extends ItemView {
 			onResize: () => {
 				/* the panel uses normal flow — cards reflow on their own */
 			},
+			revealComposer: (id) => this.revealComposer(id),
 			reply: (id, text) =>
 				void this.edit((doc) =>
 					computeAppendReply(doc, id, {
@@ -126,13 +127,37 @@ export class CommentsSidebarView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
-		for (const card of this.cards.values()) card.el.remove();
+		for (const card of this.cards.values()) {
+			card.destroy();
+			card.el.remove();
+		}
 		this.cards.clear();
 	}
 
 	/** Public hook so the plugin can re-render after an external change. */
 	requestRefresh(): void {
 		this.scheduleRefresh();
+	}
+
+	/** Scroll the panel to a thread and flash it — the landing point when a too-tall
+	 *  margin card escapes here. Switches to "All" so the thread is always shown. */
+	async revealComment(id: string): Promise<void> {
+		this.filter = "all";
+		await this.refresh();
+		const card = this.cards.get(id);
+		if (!card) return;
+		card.el.scrollIntoView({ block: "center", behavior: "smooth" });
+		card.el.addClass("dc-flash");
+		window.setTimeout(() => card.el.removeClass("dc-flash"), 1000);
+	}
+
+	/** Scroll the panel to reveal a just-opened reply composer. */
+	private revealComposer(id: string): void {
+		const card = this.cards.get(id);
+		if (!card) return;
+		window.requestAnimationFrame(() => {
+			card.el.querySelector(".dc-field--composer")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+		});
 	}
 
 	private setFilter(mode: FilterMode): void {
@@ -196,14 +221,16 @@ export class CommentsSidebarView extends ItemView {
 		const present = new Set(comments.map((c) => c.id));
 		for (const [id, card] of this.cards) {
 			if (!present.has(id)) {
+				card.destroy();
 				card.el.remove();
 				this.cards.delete(id);
 			}
 		}
+		const cardView = { app: this.app, sourcePath: () => this.file?.path ?? "" };
 		for (const c of comments) {
 			const existing = this.cards.get(c.id);
 			if (!existing) {
-				this.cards.set(c.id, new Card(c, this.cb));
+				this.cards.set(c.id, new Card(c, this.cb, cardView));
 			} else if (existing.signature !== cardSignature(c)) {
 				existing.update(c);
 			}

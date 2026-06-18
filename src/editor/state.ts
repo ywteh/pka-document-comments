@@ -58,6 +58,11 @@ const compute = (state: EditorState): CommentFieldValue => {
 		}
 		const r = anchorRange(c);
 		if (r && r.to > r.from) {
+			// A mark decoration paints over live source text, so it shows in Source
+			// mode and (via the Reading-view post-processor) in Reading view. It does
+			// NOT show where Obsidian replaces the source with a widget — most notably
+			// a Live-Preview table (.cm-table-widget, a self-contained nested editor):
+			// the underlying text is hidden, so the highlight can't render there.
 			const cls = c.status === "resolved" ? "doc-comment-span is-resolved" : "doc-comment-span";
 			decoRanges.push(Decoration.mark({ class: cls, attributes: { "data-cid": c.id } }).range(r.from, r.to));
 		}

@@ -5,7 +5,7 @@ import { anchorRange, isAnchored } from "../format/parse";
 import { commentField } from "./state";
 import { commentConfig } from "./config";
 import { clearDraft, draftField } from "./draft";
-import { Card, CardCallbacks, cardSignature } from "../ui/card";
+import { Card, CardCallbacks, CardView, cardSignature } from "../ui/card";
 import {
 	addComment,
 	appendReply,
@@ -34,6 +34,8 @@ class MarginView implements PluginValue {
 	private cb: CardCallbacks;
 	private scrollHandler = () => this.requestReposition();
 	private resizeObserver: ResizeObserver;
+	private animFrames = 0;
+	private animatingLoop = false;
 
 	constructor(private view: EditorView) {
 		this.container = view.dom.createDiv("doc-comment-margin");
@@ -59,14 +61,17 @@ class MarginView implements PluginValue {
 		this.cb = {
 			getAuthor: () => view.state.facet(commentConfig).author(),
 			onHover: (id, active) => this.setActive(active ? id : null),
-			onClickAnchor: (id) => this.scrollToAnchor(id),
+			onClickAnchor: (id) => this.flashAnchor(id),
 			onResize: () => this.reposition(),
+			animateLayout: () => this.animateLayout(),
+			revealComposer: (id) => this.revealComposer(id),
 			reply: (id, text) => void appendReply(view, id, text, this.cb.getAuthor()),
 			setResolved: (id, resolved) => void setResolved(view, id, resolved),
 			remove: (id) => void deleteComment(view, id),
 			editEntry: (id, index, text) => void editEntry(view, id, index, text),
 			deleteEntry: (id, index) => void deleteEntry(view, id, index),
 			toggleReaction: (id, emoji) => void toggleReaction(view, id, emoji, this.cb.getAuthor()),
+			openInSidebar: (id) => view.state.facet(commentConfig).openInSidebar?.(id),
 		};
 
 		view.scrollDOM.addEventListener("scroll", this.scrollHandler, { passive: true });
@@ -93,6 +98,24 @@ class MarginView implements PluginValue {
 		this.view.requestMeasure({ key: this, read: () => this.reposition() });
 	}
 
+	/** Drive the stacking for a few frames so neighbors follow a card's open/close
+	 *  height animation smoothly (vs. snapping to the final layout). */
+	private animateLayout(): void {
+		this.animFrames = 14;
+		this.reposition();
+		if (this.animatingLoop) return;
+		this.animatingLoop = true;
+		const tick = (): void => {
+			this.reposition();
+			if (this.animFrames-- > 0) {
+				window.requestAnimationFrame(tick);
+			} else {
+				this.animatingLoop = false;
+			}
+		};
+		window.requestAnimationFrame(tick);
+	}
+
 	destroy(): void {
 		this.view.scrollDOM.removeEventListener("scroll", this.scrollHandler);
 		this.resizeObserver.disconnect();
@@ -100,6 +123,7 @@ class MarginView implements PluginValue {
 		this.view.contentDOM.removeEventListener("mouseover", this.onContentMouseOver);
 		this.view.contentDOM.removeEventListener("mouseout", this.onContentMouseOut);
 		this.removeDraftOutside();
+		for (const card of this.cards.values()) card.destroy();
 		this.cards.clear();
 		this.container.remove();
 	}
@@ -123,22 +147,29 @@ class MarginView implements PluginValue {
 
 		for (const [id, card] of this.cards) {
 			if (!present.has(id)) {
+				card.destroy();
 				card.el.remove();
 				this.cards.delete(id);
 				if (this.activeId === id) this.activeId = null;
 			}
 		}
 
+		const cardView = this.cardView();
 		for (const c of comments) {
 			const existing = this.cards.get(c.id);
 			if (!existing) {
-				const card = new Card(c, this.cb);
+				const card = new Card(c, this.cb, cardView);
 				this.cards.set(c.id, card);
 				this.container.appendChild(card.el);
 			} else if (existing.signature !== cardSignature(c)) {
 				existing.update(c);
 			}
 		}
+	}
+
+	private cardView(): CardView {
+		const cfg = this.view.state.facet(commentConfig);
+		return { app: cfg.app, sourcePath: () => cfg.app?.workspace.getActiveFile()?.path ?? "", collapsible: true };
 	}
 
 	private reposition(): void {
@@ -179,8 +210,12 @@ class MarginView implements PluginValue {
 
 		if (draft && this.draftEl) place(this.draftEl, draft.from);
 
+		// Stack the cards: honor anchor order, push each down past the previous one so
+		// they never overlap. The first card's floor is -Infinity (unless orphans pin
+		// the top), so a card whose anchor has scrolled above the viewport keeps a
+		// negative top and slides off the top edge instead of sticking there in view.
 		placements.sort((a, b) => a.top - b.top);
-		let cursor = orphanCursor;
+		let cursor = orphanCursor > ORPHAN_TOP ? orphanCursor : Number.NEGATIVE_INFINITY;
 		for (const p of placements) {
 			const y = Math.max(p.top, cursor);
 			p.el.setCssStyles({ top: `${y}px` });
@@ -288,20 +323,35 @@ class MarginView implements PluginValue {
 		spans.forEach((s) => s.classList.toggle("is-active", active));
 	}
 
-	private scrollToAnchor(id: string): void {
-		const c = this.comments().find((x) => x.id === id);
-		if (!c) return;
-		const r = anchorRange(c);
-		const pos = r ? r.from : c.body?.from;
-		if (pos == null) return;
-		this.view.dispatch({ effects: EditorView.scrollIntoView(pos, { y: "center" }) });
+	/** Clicking a margin card flashes its highlighted text. No document scroll: the
+	 *  card is already aligned to its text, so scrolling the doc was pure disruption. */
+	private flashAnchor(id: string): void {
 		this.setActive(id);
-		window.setTimeout(() => {
-			const span = this.view.contentDOM.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
-			if (!span) return;
-			span.classList.add("dc-flash");
-			window.setTimeout(() => span.classList.remove("dc-flash"), 900);
-		}, 50);
+		const span = this.view.contentDOM.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
+		if (!span) return;
+		span.classList.add("dc-flash");
+		window.setTimeout(() => span.classList.remove("dc-flash"), 900);
+	}
+
+	/** Scroll the editor the minimum needed to bring a just-opened reply composer
+	 *  fully into view — without the jump-to-anchor that felt jarring. */
+	private revealComposer(id: string): void {
+		const card = this.cards.get(id);
+		if (!card) return;
+		this.view.requestMeasure({
+			read: () => {
+				const box = card.el.querySelector(".dc-field--composer");
+				if (!(box instanceof HTMLElement)) return 0;
+				const c = box.getBoundingClientRect();
+				const s = this.view.scrollDOM.getBoundingClientRect();
+				if (c.bottom > s.bottom) return c.bottom - s.bottom + 12;
+				if (c.top < s.top) return c.top - s.top - 12;
+				return 0;
+			},
+			write: (delta) => {
+				if (delta) this.view.scrollDOM.scrollTop += delta;
+			},
+		});
 	}
 
 	private onContentMouseDown = (e: MouseEvent): void => {

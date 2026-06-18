@@ -84,6 +84,13 @@ body {
 	0%, 100% { background-color: var(--dc-highlight-bg); }
 	30% { background-color: var(--dc-highlight-bg-active); }
 }
+.doc-comment-card.dc-flash {
+	animation: dc-card-flash 1000ms ease;
+}
+@keyframes dc-card-flash {
+	0%, 100% { box-shadow: var(--shadow-s); }
+	25% { box-shadow: 0 0 0 2px var(--interactive-accent); }
+}
 
 /* The floating margin column. Overlay inside the editor; clipped to viewport. */
 .doc-comment-margin {
@@ -125,7 +132,10 @@ body {
 	line-height: 1.5;
 	color: var(--text-normal);
 	pointer-events: auto;
-	transition: top 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+	/* No transition on `top`: cards must track the scroll exactly. Animating top
+	   makes them lag/swim behind the scroll (and restacks snap instantly, which is
+	   fine). Keep transitions for hover transform + shadow only. */
+	transition: transform 120ms ease, box-shadow 120ms ease;
 }
 .doc-comment-card:hover,
 .doc-comment-card.is-active,
@@ -145,6 +155,51 @@ body {
 .markdown-reading-view.dc-hide-resolved .doc-comment-card.is-resolved,
 .doc-comment-card.dc-offscreen {
 	display: none;
+}
+
+/* ── Collapse a long card (Notion-style "Show more") ───────────────────── */
+.dc-card-clip {
+	position: relative;
+}
+.dc-card-clip.dc-clamped {
+	/* Keep in sync with CLAMP_HEIGHT in card.ts. */
+	max-height: 220px;
+	overflow: hidden;
+	/* Fade the truncated text to transparent by MASKING it (not overlaying a colored
+	   gradient), so the card's real background shows through and the fade matches the
+	   card in any state — hover or not — with no color to keep in sync. */
+	-webkit-mask-image: linear-gradient(to bottom, #000 65%, transparent);
+	mask-image: linear-gradient(to bottom, #000 65%, transparent);
+}
+.dc-card-foot {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	gap: 12px;
+	margin-top: 6px;
+}
+.dc-card-foot.is-empty {
+	display: none;
+}
+/* Collapsed "Show more": a centered overlay pinned to the card's bottom edge, over
+   the faded text, so the fade reads as reaching the bottom of the card. */
+.dc-card-foot.dc-foot-overlay {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	margin: 0;
+	padding-top: 28px;
+}
+.dc-foot-btn {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-medium);
+	cursor: pointer;
+}
+.dc-foot-btn:hover {
+	color: var(--text-normal);
+	text-decoration: underline;
 }
 
 /* ── Thread entries ────────────────────────────────────────────────────── */
@@ -171,9 +226,34 @@ body {
 	font-size: var(--font-smaller);
 }
 .dc-entry__text {
-	white-space: pre-wrap;
 	overflow-wrap: anywhere;
 	color: var(--text-normal);
+}
+/* Comment text is Markdown-rendered: tighten block spacing so a one-line comment
+   reads like plain text, and keep code / lists / quotes legible inside the card. */
+.dc-entry__text > :first-child {
+	margin-top: 0;
+}
+.dc-entry__text > :last-child {
+	margin-bottom: 0;
+}
+.dc-entry__text p {
+	margin: 0 0 0.4em;
+}
+.dc-entry__text ul,
+.dc-entry__text ol {
+	margin: 0.2em 0;
+	padding-left: 1.4em;
+}
+.dc-entry__text pre {
+	margin: 0.4em 0;
+	padding: 8px;
+	overflow-x: auto;
+}
+.dc-entry__text blockquote {
+	margin: 0.3em 0;
+	padding-left: 0.8em;
+	border-left: 2px solid var(--background-modifier-border);
 }
 
 /* ── Hover action bar ──────────────────────────────────────────────────── */
