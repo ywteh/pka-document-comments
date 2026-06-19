@@ -1,4 +1,5 @@
 import { App, MarkdownView, Notice, setIcon } from "obsidian";
+import { Result } from "better-result";
 import { ParsedComment } from "../format/types";
 import { existingIds, parseComments } from "../format/parse";
 import { generateId } from "../format/ids";
@@ -27,6 +28,8 @@ export type ReadingDeps = {
 	sidebarOpen: () => boolean;
 	/** Reveal a thread in the sidebar — used by a margin card too tall to fit. */
 	openInSidebar?: (id: string) => void;
+	/** True on Obsidian mobile — no floating column; just drive highlight visibility. */
+	isMobile?: () => boolean;
 };
 
 /** A margin column for one reading-view container, aligned to highlight spans. */
@@ -102,19 +105,27 @@ class ReadingMargin {
 		this.position();
 	}
 
-	private async edit(compute: (doc: string) => Change[] | null): Promise<void> {
+	private async edit(compute: (doc: string) => Result<Change[], string>): Promise<void> {
 		const file = this.view.file;
 		if (!file) return;
-		try {
-			const newData = await this.deps.app.vault.process(file, (data) => {
-				const changes = compute(data);
-				return changes ? applyChanges(data, changes) : data;
-			});
-			await this.refresh(newData);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : "unknown error";
-			new Notice(`Couldn't save the comment: ${message}`);
-		}
+		let computeError: string | undefined;
+		const io = await Result.tryPromise({
+			try: () =>
+				this.deps.app.vault.process(file, (data) => {
+					const result = compute(data);
+					if (result.isErr()) {
+						computeError = result.error;
+						return data;
+					}
+					return applyChanges(data, result.value);
+				}),
+			catch: (e) => (e instanceof Error ? e.message : "unknown error"),
+		});
+		const outcome: Result<string, string> = computeError ? Result.err(computeError) : io;
+		outcome.match({
+			ok: (newData) => void this.refresh(newData),
+			err: (message) => new Notice(`Couldn't save the comment: ${message}`),
+		});
 	}
 
 	private reconcileCards(): void {
@@ -250,22 +261,30 @@ class ReadingMargin {
 	private async insertComment(from: number, to: number, text: string): Promise<void> {
 		const file = this.view.file;
 		if (!file) return;
-		try {
-			const newData = await this.deps.app.vault.process(file, (data) => {
-				const id = generateId(existingIds(data));
-				const changes = computeAddComment(data, from, to, {
-					id,
-					createdAt: new Date().toISOString(),
-					author: this.deps.getAuthor(),
-					text,
-				});
-				return changes ? applyChanges(data, changes) : data;
-			});
-			await this.refresh(newData);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : "unknown error";
-			new Notice(`Couldn't add the comment: ${message}`);
-		}
+		let computeError: string | undefined;
+		const io = await Result.tryPromise({
+			try: () =>
+				this.deps.app.vault.process(file, (data) => {
+					const id = generateId(existingIds(data));
+					const result = computeAddComment(data, from, to, {
+						id,
+						createdAt: new Date().toISOString(),
+						author: this.deps.getAuthor(),
+						text,
+					});
+					if (result.isErr()) {
+						computeError = result.error;
+						return data;
+					}
+					return applyChanges(data, result.value);
+				}),
+			catch: (e) => (e instanceof Error ? e.message : "unknown error"),
+		});
+		const outcome: Result<string, string> = computeError ? Result.err(computeError) : io;
+		outcome.match({
+			ok: (newData) => void this.refresh(newData),
+			err: (message) => new Notice(`Couldn't add the comment: ${message}`),
+		});
 	}
 
 	private clearDraft(): void {
@@ -390,6 +409,7 @@ export class ReadingMarginManager {
 	constructor(private deps: ReadingDeps) {}
 
 	refresh(): void {
+		const mobile = this.deps.isMobile?.() ?? false;
 		const active = new Set<HTMLElement>();
 		for (const leaf of this.deps.app.workspace.getLeavesOfType("markdown")) {
 			const view = leaf.view;
@@ -397,6 +417,15 @@ export class ReadingMarginManager {
 			const rv = view.containerEl.querySelector(".markdown-reading-view");
 			if (!(rv instanceof HTMLElement)) continue;
 			active.add(rv);
+			if (mobile) {
+				// Mobile: no floating cards or reserved column. Just keep the in-text
+				// highlights' visibility in sync with the toggles (no `dc-has`, so the
+				// text keeps full width). Comments are read/created via the sidebar.
+				rv.toggleClass("dc-highlights", this.deps.showComments());
+				rv.toggleClass("dc-hide-resolved", !this.deps.showResolved());
+				rv.removeClass("dc-has");
+				continue;
+			}
 			let margin = this.margins.get(rv);
 			if (!margin) {
 				margin = new ReadingMargin(rv, view, this.deps);

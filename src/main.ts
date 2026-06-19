@@ -1,13 +1,16 @@
-import { Editor, MarkdownView, Notice, Plugin, WorkspaceLeaf, debounce } from "obsidian";
+import { Editor, MarkdownView, Notice, Platform, Plugin, TFile, WorkspaceLeaf, debounce } from "obsidian";
+import { Result } from "better-result";
 import { EditorView } from "@codemirror/view";
 import { commentField } from "./editor/state";
 import { marginPlugin } from "./editor/margin";
 import { commentConfig } from "./editor/config";
 import { editorLayoutField } from "./editor/layout";
 import { draftField, setDraft } from "./editor/draft";
+import { addComment, insertCommentInFile } from "./editor/commands";
 import { findSectionRange, highlightPostProcessor } from "./reading/highlight";
 import { ReadingDeps, ReadingMarginManager } from "./reading/margin";
 import { COMMENTS_VIEW_TYPE, CommentsSidebarView, SidebarDeps } from "./ui/sidebar";
+import { CommentModal } from "./ui/comment-modal";
 import { DEFAULT_SETTINGS, DocCommentsSettings, DocCommentsSettingTab } from "./settings";
 
 export default class DocCommentsPlugin extends Plugin {
@@ -31,11 +34,15 @@ export default class DocCommentsPlugin extends Plugin {
 				showResolved: () => this.settings.showResolved,
 				sidebarOpen: () => this.sidebarOpen,
 				openInSidebar: (id) => void this.revealComment(id),
+				isMobile: () => Platform.isMobile,
 			}),
 			// Reflects dc-has / dc-highlights / dc-hide-resolved onto .cm-editor so the
 			// stylesheet caps the text column without a :has() selector.
 			editorLayoutField,
-			marginPlugin,
+			// The floating margin column needs horizontal room mobile doesn't have, so
+			// there we skip it entirely — comments live in the sidebar, highlights stay,
+			// and new comments are composed in a modal (see startAddComment).
+			...(Platform.isMobile ? [] : [marginPlugin]),
 		]);
 
 		// Reading view: a separate render path. Highlights come from a post-processor;
@@ -47,6 +54,7 @@ export default class DocCommentsPlugin extends Plugin {
 			showResolved: () => this.settings.showResolved,
 			sidebarOpen: () => this.sidebarOpen,
 			openInSidebar: (id) => void this.revealComment(id),
+			isMobile: () => Platform.isMobile,
 		};
 		this.readingManager = new ReadingMarginManager(readingDeps);
 		this.scheduleReadingRefresh = debounce(() => this.readingManager?.refresh(), 50, true);
@@ -153,6 +161,16 @@ export default class DocCommentsPlugin extends Plugin {
 			new Notice("Select some text to comment on.");
 			return;
 		}
+		if (Platform.isMobile) {
+			// No floating margin composer on mobile — collect the text in a modal,
+			// then write through the same editor path so it's a single undo step.
+			const quote = view.state.doc.sliceString(from, to);
+			new CommentModal(this.app, quote, (text) => {
+				const result = addComment(view, from, to, text, this.authorName());
+				if (result.isErr()) new Notice(`Couldn't add the comment: ${result.error}`);
+			}).open();
+			return;
+		}
 		// Show a draft composer card in the margin (Notion-style) instead of a modal.
 		view.dispatch({ effects: setDraft.of({ from, to }) });
 	}
@@ -177,8 +195,31 @@ export default class DocCommentsPlugin extends Plugin {
 			return;
 		}
 		const from = section.from + idx;
+		const to = from + selected.length;
+		if (Platform.isMobile) {
+			// No margin composer on mobile — write straight to the file from a modal,
+			// then refresh so the new highlight appears in the reading view.
+			const file = view.file;
+			if (!file) {
+				new Notice("No file is open.");
+				return;
+			}
+			new CommentModal(this.app, selected, (text) => {
+				void this.insertReadingComment(file, from, to, text);
+			}).open();
+			return;
+		}
 		// Same inline draft composer as the editor (no modal).
-		this.readingManager?.startDraft(view, from, from + selected.length, selection.getRangeAt(0));
+		this.readingManager?.startDraft(view, from, to, selection.getRangeAt(0));
+	}
+
+	/** Mobile reading-view create: write to the file (no editor surface) and refresh.
+	 *  insertCommentInFile already folds I/O + compute failures into the Result. */
+	private async insertReadingComment(file: TFile, from: number, to: number, text: string): Promise<void> {
+		(await insertCommentInFile(this.app, file, from, to, text, this.authorName())).match({
+			ok: () => this.scheduleReadingRefresh(),
+			err: (message) => new Notice(`Couldn't add the comment: ${message}`),
+		});
 	}
 
 	private async toggleComments(): Promise<void> {
@@ -217,19 +258,20 @@ export default class DocCommentsPlugin extends Plugin {
 	/** Reveal the comments sidebar panel, creating it in the right split if needed. */
 	private async activateSidebar(): Promise<void> {
 		const { workspace } = this.app;
-		try {
-			let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(COMMENTS_VIEW_TYPE)[0] ?? null;
-			if (!leaf) {
-				leaf = workspace.getRightLeaf(false);
-				if (!leaf) return;
-				await leaf.setViewState({ type: COMMENTS_VIEW_TYPE, active: true });
-			}
-			await workspace.revealLeaf(leaf);
-			this.syncSidebarOpen();
-		} catch (error) {
-			const message = error instanceof Error ? error.message : "unknown error";
-			new Notice(`Couldn't open the comments sidebar: ${message}`);
-		}
+		const opened = await Result.tryPromise({
+			try: async () => {
+				let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(COMMENTS_VIEW_TYPE)[0] ?? null;
+				if (!leaf) {
+					leaf = workspace.getRightLeaf(false);
+					if (!leaf) return;
+					await leaf.setViewState({ type: COMMENTS_VIEW_TYPE, active: true });
+				}
+				await workspace.revealLeaf(leaf);
+				this.syncSidebarOpen();
+			},
+			catch: (e) => (e instanceof Error ? e.message : "unknown error"),
+		});
+		if (opened.isErr()) new Notice(`Couldn't open the comments sidebar: ${opened.error}`);
 	}
 
 	/** Open the sidebar and scroll it to a thread — the escape from a margin card too
