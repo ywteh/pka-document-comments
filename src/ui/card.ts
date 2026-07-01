@@ -1,4 +1,4 @@
-import { App, Component, MarkdownRenderer, Menu, setIcon } from "obsidian";
+import { App, Component, Keymap, MarkdownRenderer, Menu, setIcon } from "obsidian";
 import { ParsedComment } from "../format/types";
 import { isAnchored, isEditAnchored } from "../format/parse";
 
@@ -83,6 +83,23 @@ export class Card {
 			// into a full-height card whose bottom you can't scroll to.
 			if (this.tooTall && this.cb.openInSidebar) this.cb.openInSidebar(this.id);
 			else this.setOpen(true);
+		});
+		// Links in rendered comment text (a [[Note]] or an http URL in a reply) don't
+		// navigate on their own — the margin container stops click propagation, so
+		// Obsidian's global link handlers never see them. Route them ourselves.
+		this.el.addEventListener("click", (e) => {
+			const link = (e.target as HTMLElement).closest("a");
+			if (!link) return;
+			if (link.classList.contains("internal-link")) {
+				if (!this.view.app) return;
+				e.preventDefault();
+				const href = link.getAttribute("data-href") || link.getAttribute("href") || link.textContent || "";
+				if (href) void this.view.app.workspace.openLinkText(href, this.view.sourcePath(), Keymap.isModEvent(e));
+			} else if (link.classList.contains("external-link")) {
+				e.preventDefault();
+				const href = link.getAttribute("href");
+				if (href) window.open(href, "_blank");
+			}
 		});
 		this.render();
 	}
