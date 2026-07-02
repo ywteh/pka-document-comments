@@ -1,12 +1,13 @@
-import { Editor, MarkdownView, Notice, Platform, Plugin, TFile, WorkspaceLeaf, debounce } from "obsidian";
+import { Editor, MarkdownView, Menu, Notice, Platform, Plugin, TFile, WorkspaceLeaf, debounce } from "obsidian";
 import { Result } from "better-result";
 import { EditorView } from "@codemirror/view";
 import { commentField } from "./editor/state";
 import { marginPlugin } from "./editor/margin";
 import { commentConfig } from "./editor/config";
 import { editorLayoutField } from "./editor/layout";
+import { markerDeleteGuard } from "./editor/marker-guard";
 import { draftField, setDraft } from "./editor/draft";
-import { addComment, insertCommentInFile } from "./editor/commands";
+import { addComment, insertCommentInFile, insertFileCommentInFile } from "./editor/commands";
 import { findSectionRange, highlightPostProcessor } from "./reading/highlight";
 import { ReadingDeps, ReadingMarginManager } from "./reading/margin";
 import { COMMENTS_VIEW_TYPE, CommentsSidebarView, SidebarDeps } from "./ui/sidebar";
@@ -26,6 +27,9 @@ export default class DocCommentsPlugin extends Plugin {
 
 		this.registerEditorExtension([
 			commentField,
+			// Backspace/Delete at an anchor edge eats the visible character beyond the
+			// hidden marker instead of the marker itself (which orphaned the comment).
+			markerDeleteGuard,
 			draftField,
 			commentConfig.of({
 				app: this.app,
@@ -34,6 +38,7 @@ export default class DocCommentsPlugin extends Plugin {
 				showResolved: () => this.settings.showResolved,
 				sidebarOpen: () => this.sidebarOpen,
 				openInSidebar: (id) => void this.revealComment(id),
+				onCursorThread: (id, editId) => this.sidebarView()?.cursorReveal(id, editId),
 				isMobile: () => Platform.isMobile,
 			}),
 			// Reflects dc-has / dc-highlights / dc-hide-resolved onto .cm-editor so the
@@ -95,7 +100,13 @@ export default class DocCommentsPlugin extends Plugin {
 		this.addCommand({
 			id: "add-comment",
 			name: "Add comment on selection",
-			editorCallback: (editor) => this.startAddComment(editor),
+			editorCallback: (editor) => this.startAddComment(editor, "selection"),
+		});
+
+		this.addCommand({
+			id: "add-comment-line",
+			name: "Add comment on current line",
+			editorCallback: (editor) => this.startAddComment(editor, "line"),
 		});
 
 		this.addCommand({
@@ -122,9 +133,20 @@ export default class DocCommentsPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "add-comment-file",
+			name: "Add comment on whole file",
+			checkCallback: (checking) => {
+				const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
+				if (!file) return false;
+				if (!checking) this.startAddFileComment(file);
+				return true;
+			},
+		});
+
+		this.addCommand({
 			id: "open-comments-sidebar",
-			name: "Open comments sidebar",
-			callback: () => void this.activateSidebar(),
+			name: "Toggle comments sidebar",
+			callback: () => void this.toggleSidebarPanel(),
 		});
 
 		this.ribbonIcon = this.addRibbonIcon(
@@ -133,31 +155,73 @@ export default class DocCommentsPlugin extends Plugin {
 			() => void this.toggleComments(),
 		);
 		this.updateRibbon();
-		this.addRibbonIcon("messages-square", "Open comments sidebar", () => void this.activateSidebar());
+		this.addRibbonIcon("messages-square", "Toggle comments sidebar", () => void this.toggleSidebarPanel());
 
 		this.registerEvent(
 			this.app.workspace.on("editor-menu", (menu, editor) => {
-				if (!editor.getSelection()) return;
+				// Right-click selects the word under the cursor, so offer both scopes
+				// explicitly: comment on that selection, or on the whole line.
+				if (editor.getSelection()) {
+					menu.addItem((item) =>
+						item
+							.setTitle("Comment on selection")
+							.setIcon("message-square")
+							.onClick(() => this.startAddComment(editor, "selection")),
+					);
+				}
 				menu.addItem((item) =>
 					item
-						.setTitle("Add comment")
+						.setTitle("Comment on line")
 						.setIcon("message-square")
-						.onClick(() => this.startAddComment(editor)),
+						.onClick(() => this.startAddComment(editor, "line")),
 				);
 			}),
 		);
 
+		// A note-wide comment is conceptually about the title, so offer it by
+		// right-clicking the note's inline title. The inline title isn't part of the
+		// editor surface (no editor-menu event), so hook its context menu directly —
+		// putting our item on top and letting Obsidian + other plugins fill in the
+		// usual file options (rename, delete, open in new tab, …) below it.
+		this.registerDomEvent(document, "contextmenu", (e) => {
+			if (!(e.target as HTMLElement).closest(".inline-title")) return;
+			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+			if (!view?.file) return;
+			const file = view.file;
+			e.preventDefault();
+			const menu = new Menu();
+			menu.addItem((item) =>
+				item
+					.setTitle("Comment on whole file")
+					.setIcon("message-square")
+					.onClick(() => this.startAddFileComment(file)),
+			);
+			menu.addSeparator();
+			this.app.workspace.trigger("file-menu", menu, file, "inline-title", view.leaf);
+			menu.showAtMouseEvent(e);
+		});
+
 		this.addSettingTab(new DocCommentsSettingTab(this.app, this));
 	}
 
-	private startAddComment(editor: Editor): void {
+	private startAddComment(editor: Editor, scope: "selection" | "line"): void {
 		const view = editorView(editor);
 		if (!view) {
 			new Notice("Couldn't access the editor.");
 			return;
 		}
-		const { from, to, empty } = view.state.selection.main;
-		if (empty) {
+		let { from, to } = view.state.selection.main;
+		if (scope === "line") {
+			// Comment on the whole line the cursor sits on. Trim its leading/trailing
+			// whitespace so the anchor wraps the meaningful text.
+			const line = view.state.doc.lineAt(view.state.selection.main.head);
+			from = line.from + (line.text.length - line.text.trimStart().length);
+			to = line.to - (line.text.length - line.text.trimEnd().length);
+			if (from >= to) {
+				new Notice("This line is empty — nothing to comment on.");
+				return;
+			}
+		} else if (from === to) {
 			new Notice("Select some text to comment on.");
 			return;
 		}
@@ -222,28 +286,55 @@ export default class DocCommentsPlugin extends Plugin {
 		});
 	}
 
+	/** File-scope comment: no anchor span, so it's always composed in a dialog and
+	 *  written straight to the file. It surfaces in the "All discussions" sidebar
+	 *  (note-wide comments have no margin anchor to attach a floating card to). */
+	private startAddFileComment(file: TFile): void {
+		new CommentModal(this.app, file.basename, (text) => {
+			void this.insertFileComment(file, text);
+		}).open();
+	}
+
+	private async insertFileComment(file: TFile, text: string): Promise<void> {
+		(await insertFileCommentInFile(this.app, file, text, this.authorName())).match({
+			ok: () => this.refreshEditors(),
+			err: (message) => new Notice(`Couldn't add the comment: ${message}`),
+		});
+	}
+
 	private async toggleComments(): Promise<void> {
+		// With the sidebar hosting the comments, this button means "switch to the
+		// inline cards": close the panel and make sure comments are shown, rather
+		// than flipping the setting underneath an open panel.
+		if (this.isSidebarVisible()) {
+			this.closeSidebarPanel();
+			if (!this.settings.showComments) {
+				this.settings.showComments = true;
+				await this.saveSettings();
+			}
+			this.updateRibbon();
+			this.refreshEditors();
+			return;
+		}
 		this.settings.showComments = !this.settings.showComments;
 		await this.saveSettings();
 		this.updateRibbon();
 		this.refreshEditors();
-		new Notice(this.settings.showComments ? "Comments shown" : "Comments hidden");
 	}
 
 	private async toggleResolved(): Promise<void> {
 		this.settings.showResolved = !this.settings.showResolved;
 		await this.saveSettings();
 		this.refreshEditors();
-		new Notice(this.settings.showResolved ? "Resolved comments shown" : "Resolved comments hidden");
 	}
 
 	private updateRibbon(): void {
 		if (!this.ribbonIcon) return;
 		this.ribbonIcon.toggleClass("is-active", this.settings.showComments);
-		this.ribbonIcon.setAttribute(
-			"aria-label",
-			this.settings.showComments ? "Hide document comments" : "Show document comments",
-		);
+		// Static label, matching "Toggle comments sidebar" — the is-active tint
+		// carries the on/off state, and with the sidebar open the action is
+		// "switch to inline" rather than a plain show/hide anyway.
+		this.ribbonIcon.setAttribute("aria-label", "Toggle document comments");
 	}
 
 	/** Force open editors + reading views (+ the sidebar) to re-evaluate live config. */
@@ -253,6 +344,31 @@ export default class DocCommentsPlugin extends Plugin {
 		});
 		this.scheduleReadingRefresh();
 		this.sidebarView()?.requestRefresh();
+	}
+
+	/** Ribbon/command behavior: close the panel when it's visible, else open it.
+	 *  A panel that merely exists but is hidden (collapsed dock, background tab)
+	 *  gets revealed rather than closed. */
+	private async toggleSidebarPanel(): Promise<void> {
+		if (this.isSidebarVisible()) {
+			this.closeSidebarPanel();
+			return;
+		}
+		await this.activateSidebar();
+	}
+
+	/** Close the comments panel for real: detach our tab AND collapse the dock it
+	 *  lived in. Detaching alone leaves the dock expanded showing whatever tab is
+	 *  next (backlinks, outline, …), which doesn't read as "closed" at all. */
+	private closeSidebarPanel(): void {
+		const { workspace } = this.app;
+		const roots = new Set(workspace.getLeavesOfType(COMMENTS_VIEW_TYPE).map((leaf) => leaf.getRoot()));
+		workspace.detachLeavesOfType(COMMENTS_VIEW_TYPE);
+		// Opening expanded the dock (revealLeaf), so closing collapses it again. A
+		// panel dragged into the main area just detaches — there's no dock to fold.
+		if (roots.has(workspace.rightSplit)) workspace.rightSplit.collapse();
+		if (roots.has(workspace.leftSplit)) workspace.leftSplit.collapse();
+		this.syncSidebarOpen();
 	}
 
 	/** Reveal the comments sidebar panel, creating it in the right split if needed. */
@@ -295,6 +411,14 @@ export default class DocCommentsPlugin extends Plugin {
 		const open = this.isSidebarVisible();
 		if (open === this.sidebarOpen) return;
 		this.sidebarOpen = open;
+		// The sidebar takes over from the inline cards: opening it flips the master
+		// toggle OFF (not merely suppresses the column), so closing the panel later
+		// doesn't pop the cards back. "Toggle document comments" brings them back.
+		if (open && this.settings.showComments) {
+			this.settings.showComments = false;
+			void this.saveSettings();
+			this.updateRibbon();
+		}
 		this.refreshEditors();
 	}
 

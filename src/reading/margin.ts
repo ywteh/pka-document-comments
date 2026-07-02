@@ -1,17 +1,19 @@
 import { App, MarkdownView, Notice, setIcon } from "obsidian";
 import { Result } from "better-result";
 import { ParsedComment } from "../format/types";
-import { existingIds, parseComments } from "../format/parse";
+import { existingIds, isFileComment, parseComments } from "../format/parse";
 import { generateId } from "../format/ids";
 import { Card, CardCallbacks, cardSignature } from "../ui/card";
 import {
 	Change,
 	applyChanges,
+	computeAcceptSuggestion,
 	computeAddComment,
 	computeAppendReply,
 	computeDeleteComment,
 	computeDeleteEntry,
 	computeEditEntry,
+	computeRejectSuggestion,
 	computeSetResolved,
 	computeToggleReaction,
 } from "../editor/edits";
@@ -38,6 +40,8 @@ class ReadingMargin {
 	private scroller: HTMLElement;
 	private cards = new Map<string, Card>();
 	private comments: ParsedComment[] = [];
+	/** Ids of file-level comments (body, no anchor) — they light the inline title. */
+	private fileLevelIds = new Set<string>();
 	private activeId: string | null = null;
 	private draft: { from: number; to: number } | null = null;
 	private draftEl: HTMLElement | null = null;
@@ -76,6 +80,14 @@ class ReadingMargin {
 			deleteEntry: (id, index) => void this.edit((doc) => computeDeleteEntry(doc, id, index)),
 			toggleReaction: (id, emoji) =>
 				void this.edit((doc) => computeToggleReaction(doc, id, emoji, deps.getAuthor())),
+			acceptSuggestion: (id, editId) =>
+				void this.edit((doc) =>
+					computeAcceptSuggestion(doc, id, editId, deps.getAuthor(), new Date().toISOString()),
+				),
+			rejectSuggestion: (id, editId) =>
+				void this.edit((doc) =>
+					computeRejectSuggestion(doc, id, editId, deps.getAuthor(), new Date().toISOString()),
+				),
 			openInSidebar: (id) => deps.openInSidebar?.(id),
 		};
 
@@ -99,6 +111,16 @@ class ReadingMargin {
 			return; // file vanished or unreadable — keep the last render
 		}
 		const all = parseComments(data).filter((c) => c.body);
+		this.fileLevelIds = new Set(all.filter((c) => isFileComment(c)).map((c) => c.id));
+		// Resting title mark: the whole-file counterpart of the span's resting amber.
+		// Keyed off the full parse so it persists while the sidebar hosts the cards.
+		const title = this.readingView.querySelector(".inline-title");
+		if (title instanceof HTMLElement) {
+			title.classList.toggle(
+				"dc-file-commented",
+				all.some((c) => isFileComment(c) && c.status !== "resolved"),
+			);
+		}
 		// Sidebar open → inline cards step aside (the panel lists them instead).
 		this.comments = this.deps.showComments() && !this.deps.sidebarOpen() ? all : [];
 		this.reconcileCards();
@@ -157,9 +179,10 @@ class ReadingMargin {
 		// write directly), so the stylesheet caps the text column with plain
 		// descendant selectors instead of :has().
 		this.readingView.toggleClass("dc-has", this.comments.length > 0 || !!this.draft);
-		// Highlights follow the master toggle alone, so they persist while the
-		// sidebar panel hosts the cards (dc-has is off, dc-highlights stays on).
-		this.readingView.toggleClass("dc-highlights", this.deps.showComments());
+		// Highlights show whenever comments are visible anywhere — inline (master
+		// toggle) or in the sidebar panel (you're looking at comments, so the
+		// in-text anchors must light up even with the inline column toggled off).
+		this.readingView.toggleClass("dc-highlights", this.deps.showComments() || this.deps.sidebarOpen());
 		const topRef = this.readingView.getBoundingClientRect().top;
 		const placements: Array<{ el: HTMLElement; top: number }> = [];
 		for (const c of this.comments) {
@@ -317,18 +340,26 @@ class ReadingMargin {
 	}
 
 	private markHighlight(id: string, active: boolean): void {
+		// File-level comments have no in-text anchor — light the inline title instead.
+		if (this.fileLevelIds.has(id)) {
+			this.readingView.querySelectorAll(".inline-title").forEach((t) => t.classList.toggle("is-active", active));
+			return;
+		}
+		const cid = cssEscape(id);
 		this.scroller
-			.querySelectorAll(`.doc-comment-span[data-cid="${cssEscape(id)}"]`)
+			.querySelectorAll(`.doc-comment-span[data-cid="${cid}"], .doc-comment-edit-span[data-cid="${cid}"]`)
 			.forEach((s) => s.classList.toggle("is-active", active));
 	}
 
 	/** Clicking a margin card flashes its highlighted text — no scroll (it's aligned). */
 	private flashAnchor(id: string): void {
 		this.setActive(id);
-		const span = this.scroller.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
-		if (!span) return;
-		span.classList.add("dc-flash");
-		window.setTimeout(() => span.classList.remove("dc-flash"), 900);
+		const target = this.fileLevelIds.has(id)
+			? this.readingView.querySelector(".inline-title")
+			: this.scroller.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
+		if (!target) return;
+		target.classList.add("dc-flash");
+		window.setTimeout(() => target.classList.remove("dc-flash"), 900);
 	}
 
 	/** Scroll the reading view the minimum needed to reveal a just-opened composer. */

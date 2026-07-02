@@ -5,11 +5,14 @@ import { existingIds } from "../format/parse";
 import { generateId } from "../format/ids";
 import {
 	applyChanges,
+	computeAcceptSuggestion,
 	computeAddComment,
+	computeAddFileComment,
 	computeAppendReply,
 	computeDeleteComment,
 	computeDeleteEntry,
 	computeEditEntry,
+	computeRejectSuggestion,
 	computeSetResolved,
 	computeToggleReaction,
 } from "./edits";
@@ -66,6 +69,28 @@ export const toggleReaction = (view: EditorView, id: string, emoji: string, auth
 	});
 };
 
+export const acceptSuggestion = (
+	view: EditorView,
+	id: string,
+	editId: string,
+	author: string,
+): Result<void, string> => {
+	return computeAcceptSuggestion(view.state.doc.toString(), id, editId, author, now()).map((changes) => {
+		view.dispatch({ changes });
+	});
+};
+
+export const rejectSuggestion = (
+	view: EditorView,
+	id: string,
+	editId: string,
+	author: string,
+): Result<void, string> => {
+	return computeRejectSuggestion(view.state.doc.toString(), id, editId, author, now()).map((changes) => {
+		view.dispatch({ changes });
+	});
+};
+
 /** Write a brand-new comment straight to a file on disk — for surfaces with no
  *  live CodeMirror view (reading view, and mobile where the margin composer is
  *  off). Ok carries the new id; Err carries a reason (I/O failure or empty range). */
@@ -93,6 +118,32 @@ export const insertCommentInFile = async (
 		catch: (e) => (e instanceof Error ? e.message : "unknown error"),
 	});
 	// Surface an I/O failure; otherwise the compute outcome (id, or the reason nothing was written).
+	return io.isErr() ? Result.err(io.error) : computed;
+};
+
+/** Write a note-wide (file-scope) comment straight to a file on disk — no anchor
+ *  span, so there's no editor selection to route through. Ok carries the new id. */
+export const insertFileCommentInFile = async (
+	app: App,
+	file: TFile,
+	text: string,
+	author: string,
+): Promise<Result<string, string>> => {
+	let computed: Result<string, string> = Result.err("No change was written.");
+	const io = await Result.tryPromise({
+		try: () =>
+			app.vault.process(file, (data) => {
+				const id = generateId(existingIds(data));
+				const result = computeAddFileComment(data, { id, createdAt: now(), author, text });
+				if (result.isErr()) {
+					computed = Result.err(result.error);
+					return data;
+				}
+				computed = Result.ok(id);
+				return applyChanges(data, result.value);
+			}),
+		catch: (e) => (e instanceof Error ? e.message : "unknown error"),
+	});
 	return io.isErr() ? Result.err(io.error) : computed;
 };
 

@@ -12,3 +12,6 @@ coverage/
 
 # obsidian local test vault symlinks
 /test-vault/.obsidian/plugins/document-comments/main.js
+
+# Obsidian-written plugin settings (repo doubles as the live plugin dir via symlink)
+data.json

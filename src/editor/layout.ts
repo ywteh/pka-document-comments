@@ -21,9 +21,10 @@ const editorLayoutClasses = (state: EditorState): string => {
 
 	const classes: string[] = [];
 	if (hasColumn) classes.push("dc-has");
-	// Highlights follow the master toggle alone, so they persist while the sidebar
-	// panel hosts the cards (dc-has off, dc-highlights on).
-	if (cfg.showComments()) classes.push("dc-highlights");
+	// Highlights show whenever comments are visible ANYWHERE — inline (master toggle)
+	// or in the sidebar panel. An open panel means you're looking at comments, so the
+	// in-text anchors must light up even if the inline column is toggled off.
+	if (cfg.showComments() || cfg.sidebarOpen()) classes.push("dc-highlights");
 	if (!cfg.showResolved()) classes.push("dc-hide-resolved");
 	return classes.join(" ");
 };

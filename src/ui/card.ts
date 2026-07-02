@@ -1,6 +1,6 @@
-import { App, Component, MarkdownRenderer, Menu, setIcon } from "obsidian";
+import { App, Component, Keymap, MarkdownRenderer, Menu, setIcon } from "obsidian";
 import { ParsedComment } from "../format/types";
-import { isAnchored } from "../format/parse";
+import { isAnchored, isEditAnchored, isOrphan } from "../format/parse";
 
 const QUICK_EMOJI = ["👍", "❤️", "😄", "🎉", "😮", "👀", "🙏"];
 
@@ -24,6 +24,14 @@ export type CardCallbacks = {
 	editEntry: (id: string, index: number, text: string) => void;
 	deleteEntry: (id: string, index: number) => void;
 	toggleReaction: (id: string, emoji: string) => void;
+	/** Hovering one suggestion row: light just THAT edit's sub-span (stronger than
+	 *  the whole-thread wash the card hover applies). Editor views only — reading
+	 *  view doesn't render edit sub-spans. */
+	onHoverEdit?: (id: string, editId: string, active: boolean) => void;
+	/** Apply a suggested edit (replace within its `e:` markers) and drop the `~` line. */
+	acceptSuggestion: (id: string, editId: string) => void;
+	/** Discard a suggested edit (unwrap its markers, prose untouched) and drop the `~` line. */
+	rejectSuggestion: (id: string, editId: string) => void;
 	/** Bring a just-opened reply composer fully into view (the margin scrolls the
 	 *  editor minimally; the sidebar scrolls its own list). */
 	revealComposer?: (id: string) => void;
@@ -56,6 +64,9 @@ export class Card {
 	private clipEl: HTMLElement | null = null;
 	private threadEl: HTMLElement | null = null;
 	private footEl: HTMLElement | null = null;
+	/** Suggestion row elements by editId — lets the cursor light a single row. */
+	private suggestionRows = new Map<string, HTMLElement>();
+	private activeEditId: string | null = null;
 	/** Owns the child components MarkdownRenderer attaches (link/embed handlers). */
 	private md = new Component();
 	/** Re-measures overflow when the (async-rendered) content settles or changes. */
@@ -79,6 +90,23 @@ export class Card {
 			// into a full-height card whose bottom you can't scroll to.
 			if (this.tooTall && this.cb.openInSidebar) this.cb.openInSidebar(this.id);
 			else this.setOpen(true);
+		});
+		// Links in rendered comment text (a [[Note]] or an http URL in a reply) don't
+		// navigate on their own — the margin container stops click propagation, so
+		// Obsidian's global link handlers never see them. Route them ourselves.
+		this.el.addEventListener("click", (e) => {
+			const link = (e.target as HTMLElement).closest("a");
+			if (!link) return;
+			if (link.classList.contains("internal-link")) {
+				if (!this.view.app) return;
+				e.preventDefault();
+				const href = link.getAttribute("data-href") || link.getAttribute("href") || link.textContent || "";
+				if (href) void this.view.app.workspace.openLinkText(href, this.view.sourcePath(), Keymap.isModEvent(e));
+			} else if (link.classList.contains("external-link")) {
+				e.preventDefault();
+				const href = link.getAttribute("href");
+				if (href) window.open(href, "_blank");
+			}
 		});
 		this.render();
 	}
@@ -106,6 +134,13 @@ export class Card {
 
 	setActive(active: boolean): void {
 		this.el.toggleClass("is-active", active);
+	}
+
+	/** Light one suggestion row (cursor sitting in its edit sub-span), or none. */
+	setActiveEdit(editId: string | null): void {
+		if (this.activeEditId === editId) return;
+		this.activeEditId = editId;
+		for (const [eid, row] of this.suggestionRows) row.toggleClass("is-active", eid === editId);
 	}
 
 	private setOpen(open: boolean): void {
@@ -151,6 +186,7 @@ export class Card {
 	private render(): void {
 		const c = this.comment;
 		this.el.empty();
+		this.suggestionRows.clear();
 		this.el.toggleClass("is-resolved", c.status === "resolved");
 		this.el.toggleClass("is-open", this.open);
 
@@ -158,9 +194,19 @@ export class Card {
 		// collapsed; the footer (Show more / Open in sidebar) sits outside the clip.
 		const clip = this.el.createDiv("dc-card-clip");
 		this.clipEl = clip;
+		// A comment whose anchor markers were deleted: warn, and show the quote it used
+		// to sit on so the reader can find the spot (or delete the comment).
+		this.el.toggleClass("is-orphan", isOrphan(c));
+		if (isOrphan(c)) {
+			clip.createDiv({
+				cls: "dc-card-warn",
+				text: `⚠ anchor lost — was on: “${c.quote}”`,
+			});
+		}
 		const thread = clip.createDiv("dc-thread");
 		this.threadEl = thread;
 		c.thread.forEach((entry, i) => this.renderEntry(thread, entry, i));
+		if (c.suggestions.length > 0) this.renderSuggestions(clip);
 		if (this.open) this.renderComposer(clip);
 
 		this.footEl = this.el.createDiv("dc-card-foot");
@@ -290,6 +336,62 @@ export class Card {
 				e.stopPropagation();
 				this.cb.toggleReaction(this.id, r.emoji);
 			});
+		}
+	}
+
+	/** Render the accept/reject-able suggested edits as a list under the thread. */
+	private renderSuggestions(parent: HTMLElement): void {
+		const wrap = parent.createDiv("dc-suggestions");
+		for (const s of this.comment.suggestions) {
+			const anchored = isEditAnchored(s);
+			const row = wrap.createDiv("dc-suggestion");
+			this.suggestionRows.set(s.editId, row);
+			row.toggleClass("is-active", s.editId === this.activeEditId);
+			row.toggleClass("is-orphan", !anchored);
+			row.toggleClass("is-stale", s.stale);
+			row.toggleClass("is-conflict", s.conflict);
+			if (anchored && this.cb.onHoverEdit) {
+				row.addEventListener("mouseenter", () => this.cb.onHoverEdit?.(this.id, s.editId, true));
+				row.addEventListener("mouseleave", () => this.cb.onHoverEdit?.(this.id, s.editId, false));
+			}
+
+			// Another anchor's marker sits inside this edit's replace range — accepting
+			// would destroy it, so Accept is withheld (reject stays safe).
+			if (s.conflict) {
+				row.createDiv({
+					cls: "dc-suggestion__stale",
+					text: "⚠ overlaps another comment's anchor — can't accept",
+				});
+			}
+			// The prose moved under this suggestion since it was made — accepting still
+			// replaces whatever's between the markers, so warn rather than block.
+			else if (s.stale) {
+				row.createDiv({
+					cls: "dc-suggestion__stale",
+					text: "⚠ text changed since this was suggested",
+				});
+			}
+
+			const diff = row.createDiv("dc-suggestion__diff");
+			if (s.was) diff.createSpan({ cls: "dc-suggestion__old", text: s.was });
+			if (s.replacement === "") {
+				diff.createSpan({ cls: "dc-suggestion__del", text: s.was ? "(delete)" : "(empty)" });
+			} else {
+				if (s.was) diff.createSpan({ cls: "dc-suggestion__arrow", text: "→" });
+				diff.createSpan({ cls: "dc-suggestion__new", text: s.replacement });
+			}
+
+			const actions = row.createDiv("dc-suggestion__actions");
+			// Accept needs live markers to replace within (and no overlap conflict); an
+			// orphaned suggestion can only be rejected (which just clears the `~` line).
+			if (anchored && !s.conflict) {
+				this.roundButton(actions, "check", "Accept", "dc-round--confirm", () =>
+					this.cb.acceptSuggestion(this.id, s.editId),
+				);
+			}
+			this.roundButton(actions, "x", "Reject", "dc-round--cancel", () =>
+				this.cb.rejectSuggestion(this.id, s.editId),
+			);
 		}
 	}
 
@@ -432,9 +534,20 @@ export class Card {
 	}
 }
 
-/** Content signature, independent of document position — drives margin diffing. */
+/** Content signature, independent of document position — drives margin diffing.
+ *  Suggestions are included (with their anchored state) so accept/reject/state
+ *  changes actually repaint the card. */
 export const cardSignature = (c: ParsedComment): string => {
-	return JSON.stringify([c.status, c.author, c.createdAt, c.thread, c.reactions, isAnchored(c)]);
+	return JSON.stringify([
+		c.status,
+		c.author,
+		c.createdAt,
+		c.thread,
+		c.reactions,
+		isAnchored(c),
+		c.quote, // the orphan banner shows it
+		c.suggestions.map((s) => [s.editId, s.state, s.was, s.replacement, isEditAnchored(s), s.stale, s.conflict]),
+	]);
 };
 
 const autogrow = (ta: HTMLTextAreaElement): void => {

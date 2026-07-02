@@ -9,6 +9,11 @@ body {
 	--dc-highlight-bg: hsla(45, 90%, 50%, 0.18);
 	--dc-highlight-bg-active: hsla(45, 90%, 50%, 0.38);
 	--dc-highlight-border: hsla(45, 90%, 45%, 0.7);
+	/* Suggested-edit targets — a cooler hue so they read as distinct from the amber
+	   comment highlight they usually nest inside. */
+	--dc-edit-bg: hsla(210, 90%, 56%, 0.13);
+	--dc-edit-bg-active: hsla(210, 90%, 56%, 0.30);
+	--dc-edit-border: hsla(210, 85%, 55%, 0.85);
 }
 
 /* Layout is keyed on a `dc-has` class set on the editor / reading-view container.
@@ -70,8 +75,14 @@ body {
 	border-bottom-color: transparent;
 	cursor: text;
 }
+/* Hovering a card (margin or sidebar) flares its anchored text. The resting span is
+   already amber, so the active state needs to clearly pop, not just deepen: a brighter
+   fill plus a soft ring that extends past the text line. */
 .doc-comment-span.is-active {
 	background-color: var(--dc-highlight-bg-active);
+	border-bottom-color: hsla(45, 90%, 40%, 0.95);
+	box-shadow: 0 0 0 3px var(--dc-highlight-bg-active);
+	border-radius: 2px;
 }
 .doc-comment-span.is-resolved {
 	background-color: transparent;
@@ -80,10 +91,72 @@ body {
 .doc-comment-span.dc-flash {
 	animation: dc-flash 900ms ease;
 }
+
+/* Suggested-edit target: a distinct sub-highlight over the exact text a pending
+   edit would change (Live Preview / Source). Usually nests inside the anchor span,
+   so it's a dashed underline in a cooler hue; it brightens with its parent card. */
+.doc-comment-edit-span {
+	border-bottom: 2px dashed var(--dc-edit-border);
+	border-radius: 2px;
+	cursor: pointer;
+	transition: background-color 120ms ease;
+}
+.doc-comment-edit-span.is-active {
+	background-color: var(--dc-edit-bg-active);
+}
+/* Hovering the text itself lights the whole thread's edit targets (matches the
+   card-hover path, which toggles .is-active on these spans). */
+.doc-comment-edit-span:hover {
+	background-color: var(--dc-edit-bg);
+}
+/* Hovering ONE suggestion row in a card: that edit's span alone glows harder than
+   the thread-wide .is-active wash — solid underline plus a ring. */
+.doc-comment-edit-span.is-edit-active {
+	background-color: var(--dc-edit-bg-active);
+	border-bottom-style: solid;
+	box-shadow: 0 0 0 2px var(--dc-edit-bg-active);
+	border-radius: 2px;
+}
+/* Follow the master toggle and the hide-resolved toggle, same as the anchor span. */
+.cm-editor:not(.dc-highlights) .doc-comment-edit-span,
+.markdown-reading-view:not(.dc-highlights) .doc-comment-edit-span,
+.cm-editor.dc-hide-resolved .doc-comment-edit-span.is-resolved,
+.markdown-reading-view.dc-hide-resolved .doc-comment-edit-span.is-resolved {
+	background-color: transparent;
+	border-bottom-color: transparent;
+	cursor: text;
+}
 @keyframes dc-flash {
 	0%, 100% { background-color: var(--dc-highlight-bg); }
 	30% { background-color: var(--dc-highlight-bg-active); }
 }
+/* File-level comments have no in-text anchor, so their thread lights up the note's
+   inline title instead — the whole-file "anchor". At rest the title carries the same
+   amber as an anchored span (class set by the margins while an open file-level
+   comment exists); hovering/clicking the card flares it. Order matters below:
+   resting → master-toggle mute → flare, each container-prefixed so the later rule
+   wins its predecessor. */
+.cm-editor .inline-title.dc-file-commented,
+.markdown-reading-view .inline-title.dc-file-commented {
+	background-color: var(--dc-highlight-bg);
+	border-bottom: 2px solid var(--dc-highlight-border);
+	border-radius: 4px;
+}
+.cm-editor:not(.dc-highlights) .inline-title.dc-file-commented,
+.markdown-reading-view:not(.dc-highlights) .inline-title.dc-file-commented {
+	background-color: transparent;
+	border-bottom-color: transparent;
+}
+.cm-editor .inline-title.is-active,
+.markdown-reading-view .inline-title.is-active {
+	background-color: var(--dc-highlight-bg-active);
+	border-radius: 4px;
+}
+.inline-title.dc-flash {
+	animation: dc-flash 900ms ease;
+	border-radius: 4px;
+}
+
 .doc-comment-card.dc-flash {
 	animation: dc-card-flash 1000ms ease;
 }
@@ -147,6 +220,13 @@ body {
 		var(--shadow-l);
 	transform: translateX(-2px);
 	z-index: 2;
+}
+/* Programmatic activation (cursor in the anchor / title focused) must read at a
+   glance — the hover lift alone is invisible in the sidebar dock. Amber ring,
+   matching the anchor highlight. Hover keeps the subtle treatment above. */
+.doc-comment-card.is-active {
+	border-color: var(--dc-highlight-border);
+	box-shadow: 0 0 0 1px var(--dc-highlight-border), var(--shadow-s);
 }
 .doc-comment-card.is-resolved {
 	opacity: 0.65;
@@ -408,6 +488,103 @@ body {
 }
 .dc-round--confirm:hover {
 	background-color: var(--interactive-accent-hover);
+}
+
+/* ── Suggested edits (accept / reject) ─────────────────────────────────── */
+.dc-suggestions {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-top: 10px;
+}
+.dc-suggestion {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 6px 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-left: 2px solid var(--interactive-accent);
+	border-radius: var(--radius-s, 6px);
+	background-color: var(--background-secondary);
+}
+/* The text cursor sits in this edit's sub-span — light the row in the card. */
+.dc-suggestion.is-active {
+	background-color: var(--dc-edit-bg);
+	border-color: var(--dc-edit-border);
+	border-left-color: var(--dc-edit-border);
+}
+.dc-suggestion.is-orphan {
+	border-left-color: var(--background-modifier-border);
+	opacity: 0.75;
+}
+/* The prose changed under this suggestion — warn, don't block (accept still works). */
+.dc-suggestion.is-stale {
+	border-left-color: var(--text-warning, hsl(40, 90%, 50%));
+}
+/* Another anchor's marker sits inside this edit's range — accept is withheld. */
+.dc-suggestion.is-conflict {
+	border-left-color: var(--text-error, hsl(0, 70%, 55%));
+}
+.dc-suggestion__stale {
+	flex-basis: 100%;
+	order: -1;
+	font-size: var(--font-smaller);
+	color: var(--text-warning, hsl(40, 80%, 45%));
+}
+.dc-suggestion.is-conflict .dc-suggestion__stale {
+	color: var(--text-error, hsl(0, 65%, 50%));
+}
+/* Card-level warning banner (orphaned comment: anchor markers were deleted). */
+.dc-card-warn {
+	margin-bottom: 6px;
+	padding: 4px 8px;
+	border-left: 2px solid var(--text-warning, hsl(40, 90%, 50%));
+	border-radius: var(--radius-s, 6px);
+	background-color: var(--background-secondary);
+	font-size: var(--font-smaller);
+	color: var(--text-warning, hsl(40, 80%, 45%));
+	overflow-wrap: anywhere;
+}
+.dc-suggestion__diff {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: 5px;
+	min-width: 0;
+	font-size: var(--font-smaller);
+	line-height: 1.4;
+}
+.dc-suggestion__old {
+	color: var(--text-muted);
+	text-decoration: line-through;
+	text-decoration-color: var(--text-faint);
+}
+.dc-suggestion__arrow {
+	color: var(--text-faint);
+}
+.dc-suggestion__new {
+	color: var(--text-normal);
+	font-weight: var(--font-medium, 500);
+}
+.dc-suggestion__del {
+	color: var(--text-muted);
+	font-style: italic;
+}
+.dc-suggestion__actions {
+	flex: 0 0 auto;
+	display: flex;
+	gap: 6px;
+}
+/* Slightly smaller than the composer's round buttons — these sit inside a row. */
+.dc-suggestion__actions .dc-round {
+	width: 22px;
+	height: 22px;
+}
+.dc-suggestion__actions .dc-round .svg-icon {
+	width: 13px;
+	height: 13px;
 }
 
 /* ── Emoji picker popover ──────────────────────────────────────────────── */

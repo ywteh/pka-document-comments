@@ -41,3 +41,38 @@ describe("commentField decorations", () => {
 		expect(cids).toContain("xoua6");
 	});
 });
+
+const WITH_EDIT = [
+	"We will <!--c:c1--><!--e:e1-->definitely<!--/e:e1--> ship<!--/c:c1-->.",
+	'<!--co:c1 status:open quote:"definitely ship"',
+	'~ @e1 was:"definitely" state:proposed -> ""',
+	"-->",
+].join("\n");
+
+describe("edit-target decorations", () => {
+	test("paints an edit sub-highlight keyed to its parent comment", () => {
+		const state = EditorState.create({ doc: WITH_EDIT, extensions: [commentField] });
+		let editSpan: { cid?: string; eid?: string } | null = null;
+		const cursor = state.field(commentField).decorations.iter();
+		while (cursor.value) {
+			const eid = cursor.value.spec?.attributes?.["data-eid"];
+			if (eid) editSpan = { cid: cursor.value.spec?.attributes?.["data-cid"], eid };
+			cursor.next();
+		}
+		expect(editSpan).toEqual({ cid: "c1", eid: "e1" });
+	});
+
+	test("hides the e: markers so they don't show as raw text", () => {
+		const state = EditorState.create({ doc: WITH_EDIT, extensions: [commentField] });
+		const atomic = state.field(commentField).atomic;
+		const marker = "<!--e:e1-->";
+		const at = WITH_EDIT.indexOf(marker);
+		let covered = false;
+		const it = atomic.iter();
+		while (it.value) {
+			if (it.from <= at && it.to >= at + marker.length) covered = true;
+			it.next();
+		}
+		expect(covered).toBe(true);
+	});
+});

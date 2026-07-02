@@ -2,17 +2,19 @@ import { Notice, setIcon } from "obsidian";
 import { Result } from "better-result";
 import { EditorView, PluginValue, ViewPlugin } from "@codemirror/view";
 import { ParsedComment } from "../format/types";
-import { anchorRange, isAnchored } from "../format/parse";
+import { anchorRange, editTextRange, isAnchored, isFileComment } from "../format/parse";
 import { commentField } from "./state";
 import { commentConfig } from "./config";
 import { clearDraft, draftField } from "./draft";
 import { Card, CardCallbacks, CardView, cardSignature } from "../ui/card";
 import {
+	acceptSuggestion,
 	addComment,
 	appendReply,
 	deleteComment,
 	deleteEntry,
 	editEntry,
+	rejectSuggestion,
 	setResolved,
 	toggleReaction,
 } from "./commands";
@@ -35,6 +37,8 @@ class MarginView implements PluginValue {
 	private container: HTMLElement;
 	private cards = new Map<string, Card>();
 	private activeId: string | null = null;
+	/** Last (id, editId) pair the text cursor sat in — dedupes syncCursor work. */
+	private cursorKey = "";
 	private draftEl: HTMLElement | null = null;
 	private draftFocused = false;
 	private draftOutside: ((e: MouseEvent) => void) | null = null;
@@ -67,7 +71,10 @@ class MarginView implements PluginValue {
 		}
 		this.cb = {
 			getAuthor: () => view.state.facet(commentConfig).author(),
-			onHover: (id, active) => this.setActive(active ? id : null),
+			// Hover-leave falls back to the cursor's thread (if any) rather than
+			// clearing — so a cursor-lit card survives a stray mouse pass.
+			onHover: (id, active) => this.setActive(active ? id : (this.cursorHit()?.id ?? null)),
+			onHoverEdit: (id, editId, active) => this.markEditHighlight(id, editId, active),
 			onClickAnchor: (id) => this.flashAnchor(id),
 			onResize: () => this.reposition(),
 			animateLayout: () => this.animateLayout(),
@@ -78,6 +85,8 @@ class MarginView implements PluginValue {
 			editEntry: (id, index, text) => notifyErr(editEntry(view, id, index, text)),
 			deleteEntry: (id, index) => notifyErr(deleteEntry(view, id, index)),
 			toggleReaction: (id, emoji) => notifyErr(toggleReaction(view, id, emoji, this.cb.getAuthor())),
+			acceptSuggestion: (id, editId) => notifyErr(acceptSuggestion(view, id, editId, this.cb.getAuthor())),
+			rejectSuggestion: (id, editId) => notifyErr(rejectSuggestion(view, id, editId, this.cb.getAuthor())),
 			openInSidebar: (id) => view.state.facet(commentConfig).openInSidebar?.(id),
 		};
 
@@ -87,6 +96,11 @@ class MarginView implements PluginValue {
 		view.contentDOM.addEventListener("mousedown", this.onContentMouseDown);
 		view.contentDOM.addEventListener("mouseover", this.onContentMouseOver);
 		view.contentDOM.addEventListener("mouseout", this.onContentMouseOut);
+		// The inline title is a separate contenteditable OUTSIDE the CM document, so
+		// the selection watcher can't see the cursor there. Focus events stand in:
+		// title focused = "cursor on the file-level comment's anchor".
+		view.dom.addEventListener("focusin", this.onTitleFocusIn);
+		view.dom.addEventListener("focusout", this.onTitleFocusOut);
 
 		this.reconcile();
 		this.requestReposition();
@@ -98,7 +112,71 @@ class MarginView implements PluginValue {
 		// called during an update/construction, so positioning MUST go through
 		// requestMeasure. The key also coalesces bursts into one measure per frame.
 		this.reconcile();
+		this.syncCursor();
 		this.requestReposition();
+	}
+
+	/** The comment (and edit sub-span) the text cursor currently sits in, if any.
+	 *  Reads the raw field — NOT comments(), which is empty while the sidebar
+	 *  hosts the cards, exactly when the cursor should reveal the thread there. */
+	private cursorHit(): { id: string; editId: string | null } | null {
+		const pos = this.view.state.selection.main.head;
+		const all = this.view.state.field(commentField, false)?.comments ?? [];
+		let hit: { id: string; editId: string | null } | null = null;
+		for (const c of all) {
+			const r = anchorRange(c);
+			if (!r || pos < r.from || pos > r.to) continue;
+			let editId: string | null = null;
+			for (const s of c.suggestions) {
+				const er = editTextRange(s);
+				if (er && pos >= er.from && pos <= er.to) editId = s.editId;
+			}
+			hit = { id: c.id, editId }; // nested anchors: the later (inner) one wins
+		}
+		return hit;
+	}
+
+	/** The first live file-level comment — the one the focused title stands for. */
+	private fileCommentId(): string | null {
+		const all = this.view.state.field(commentField, false)?.comments ?? [];
+		const c = all.find((x) => isFileComment(x) && x.status !== "resolved") ?? all.find(isFileComment);
+		return c?.id ?? null;
+	}
+
+	private titleFocused(): boolean {
+		const ae = this.view.dom.ownerDocument.activeElement;
+		return ae instanceof HTMLElement && !!ae.closest(".inline-title");
+	}
+
+	private onTitleFocusIn = (e: FocusEvent): void => {
+		if (!(e.target instanceof HTMLElement) || !e.target.closest(".inline-title")) return;
+		const id = this.fileCommentId();
+		if (!id) return;
+		this.cursorKey = `title:${id}`;
+		this.setActive(id);
+		this.view.state.facet(commentConfig).onCursorThread?.(id, null);
+	};
+
+	private onTitleFocusOut = (e: FocusEvent): void => {
+		if (!(e.target instanceof HTMLElement) || !e.target.closest(".inline-title")) return;
+		this.cursorKey = ":force"; // impossible key (ids are alphanumeric) so syncCursor recomputes
+		this.syncCursor();
+	};
+
+	/** Cursor moved into / out of an anchor: light the card (and the specific
+	 *  suggestion row), and let the sidebar scroll the thread into view when it's
+	 *  hosting the cards. Cheap — bails unless the (id, editId) pair changed. */
+	private syncCursor(): void {
+		// While the title holds focus, the file-level activation owns the state —
+		// the CM selection still points wherever the cursor last was in the body.
+		if (this.titleFocused()) return;
+		const hit = this.cursorHit();
+		const key = hit ? `${hit.id}:${hit.editId ?? ""}` : "";
+		if (key === this.cursorKey) return;
+		this.cursorKey = key;
+		this.setActive(hit?.id ?? null);
+		for (const [cid, card] of this.cards) card.setActiveEdit(cid === hit?.id ? hit.editId : null);
+		this.view.state.facet(commentConfig).onCursorThread?.(hit?.id ?? null, hit?.editId ?? null);
 	}
 
 	private requestReposition(): void {
@@ -129,6 +207,8 @@ class MarginView implements PluginValue {
 		this.view.contentDOM.removeEventListener("mousedown", this.onContentMouseDown);
 		this.view.contentDOM.removeEventListener("mouseover", this.onContentMouseOver);
 		this.view.contentDOM.removeEventListener("mouseout", this.onContentMouseOut);
+		this.view.dom.removeEventListener("focusin", this.onTitleFocusIn);
+		this.view.dom.removeEventListener("focusout", this.onTitleFocusOut);
 		this.removeDraftOutside();
 		for (const card of this.cards.values()) card.destroy();
 		this.cards.clear();
@@ -149,6 +229,7 @@ class MarginView implements PluginValue {
 	}
 
 	private reconcile(): void {
+		this.syncTitleMark();
 		const comments = this.comments();
 		const present = new Set(comments.map((c) => c.id));
 
@@ -172,6 +253,18 @@ class MarginView implements PluginValue {
 				existing.update(c);
 			}
 		}
+	}
+
+	/** Mark the inline title while the note has an open file-level comment — the
+	 *  whole-file counterpart of the anchored span's resting highlight. Keyed off the
+	 *  full parse (not the sidebar-filtered card list) so it persists, like the span
+	 *  highlights, while the sidebar hosts the cards; the master toggle mutes it in CSS. */
+	private syncTitleMark(): void {
+		const title = this.titleEl();
+		if (!title) return;
+		const all = this.view.state.field(commentField, false)?.comments ?? [];
+		const marked = all.some((c) => isFileComment(c) && c.status !== "resolved");
+		title.classList.toggle("dc-file-commented", marked);
 	}
 
 	private cardView(): CardView {
@@ -325,19 +418,46 @@ class MarginView implements PluginValue {
 		}
 	}
 
+	/** File-level comments (body, no anchor span, no quote) light the note's inline
+	 *  title instead of an in-text highlight — the title is their "anchor". Orphans
+	 *  (quote but lost markers) are NOT file-level: they get a warning banner. */
+	private isFileLevel(id: string): boolean {
+		const c = this.view.state.field(commentField, false)?.comments.find((x) => x.id === id);
+		return !!c && isFileComment(c);
+	}
+
+	/** The note's inline title (inside .cm-sizer in Live Preview), if shown. */
+	private titleEl(): HTMLElement | null {
+		const el = this.view.dom.querySelector(".inline-title");
+		return el instanceof HTMLElement ? el : null;
+	}
+
+	/** Hovering one suggestion row lights just that edit's sub-span. */
+	private markEditHighlight(id: string, editId: string, active: boolean): void {
+		const sel = `.doc-comment-edit-span[data-cid="${cssEscape(id)}"][data-eid="${cssEscape(editId)}"]`;
+		this.view.contentDOM.querySelectorAll(sel).forEach((s) => s.classList.toggle("is-edit-active", active));
+	}
+
 	private markHighlight(id: string, active: boolean): void {
-		const spans = this.view.contentDOM.querySelectorAll(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
-		spans.forEach((s) => s.classList.toggle("is-active", active));
+		if (this.isFileLevel(id)) {
+			this.titleEl()?.classList.toggle("is-active", active);
+			return;
+		}
+		const cid = cssEscape(id);
+		const sel = `.doc-comment-span[data-cid="${cid}"], .doc-comment-edit-span[data-cid="${cid}"]`;
+		this.view.contentDOM.querySelectorAll(sel).forEach((s) => s.classList.toggle("is-active", active));
 	}
 
 	/** Clicking a margin card flashes its highlighted text. No document scroll: the
 	 *  card is already aligned to its text, so scrolling the doc was pure disruption. */
 	private flashAnchor(id: string): void {
 		this.setActive(id);
-		const span = this.view.contentDOM.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
-		if (!span) return;
-		span.classList.add("dc-flash");
-		window.setTimeout(() => span.classList.remove("dc-flash"), 900);
+		const target = this.isFileLevel(id)
+			? this.titleEl()
+			: this.view.contentDOM.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
+		if (!target) return;
+		target.classList.add("dc-flash");
+		window.setTimeout(() => target.classList.remove("dc-flash"), 900);
 	}
 
 	/** Scroll the editor the minimum needed to bring a just-opened reply composer

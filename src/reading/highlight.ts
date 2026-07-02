@@ -17,6 +17,9 @@ export const findSectionRange = (node: Node): { from: number; source: string } |
 	return null;
 };
 
+// `<!--e:ID-->` / `<!--/e:ID-->` edit-target markers, stripped from a rendered anchor.
+const EDIT_MARKER_RE = /<!--\/?e:[A-Za-z0-9]+-->/g;
+
 // Parsing the whole file per rendered block would be wasteful, so cache the last
 // parse keyed on the exact source text.
 let cacheKey: string | null = null;
@@ -54,7 +57,11 @@ export const highlightPostProcessor = (el: HTMLElement, ctx: MarkdownPostProcess
 		if (!range) continue;
 		// Only act on comments whose anchor starts within this rendered section.
 		if (range.from < sectionFrom || range.from >= sectionTo) continue;
-		const quote = text.slice(range.from, range.to);
+		// The anchor may contain `e:` edit markers; they're HTML comments and vanish in
+		// the rendered output, so strip them from the needle or it won't match. (The
+		// per-edit sub-highlight is a Live-Preview/Source feature; Reading view keeps the
+		// whole-anchor highlight.)
+		const quote = text.slice(range.from, range.to).replace(EDIT_MARKER_RE, "");
 		if (quote.trim()) wrapFirstMatch(el, quote, c.id, c.status === "resolved");
 	}
 };

@@ -28,6 +28,22 @@ describe("reading-view highlight post-processor", () => {
 		expect(el.querySelector(".doc-comment-span[data-cid='p1']")?.textContent).toBe("Friday");
 	});
 
+	test("highlights an anchor that contains e: edit markers (markers stripped)", () => {
+		const doc = [
+			"We will <!--c:p2-->clearly <!--e:e1-->definitely<!--/e:e1--> ship<!--/c:p2--> now.",
+			'<!--co:p2 by:me at:2026-01-01T00:00:00.000Z status:open quote:"clearly definitely ship"',
+			'~ @e1 was:"definitely" state:proposed -> ""',
+			"-->",
+			"",
+		].join("\n");
+		// Rendered DOM: HTML comments (both c: and e:) are gone.
+		const el = document.createElement("p");
+		el.textContent = "We will clearly definitely ship now.";
+		highlightPostProcessor(el, ctxFor(doc, 0, 0));
+		// The whole anchor still highlights — the e: markers were stripped from the needle.
+		expect(el.querySelector(".doc-comment-span[data-cid='p2']")?.textContent).toBe("clearly definitely ship");
+	});
+
 	test("wraps a comment anchor that lands inside a table cell", () => {
 		const doc = [
 			"| Day | Note |",

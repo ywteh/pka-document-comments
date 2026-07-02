@@ -2,15 +2,17 @@ import { App, Debouncer, ItemView, MarkdownView, Notice, TFile, WorkspaceLeaf, d
 import { Result } from "better-result";
 import { EditorView } from "@codemirror/view";
 import { ParsedComment } from "../format/types";
-import { anchorRange, parseComments } from "../format/parse";
+import { anchorRange, isFileComment, parseComments } from "../format/parse";
 import { Card, CardCallbacks, cardSignature } from "./card";
 import {
 	Change,
 	applyChanges,
+	computeAcceptSuggestion,
 	computeAppendReply,
 	computeDeleteComment,
 	computeDeleteEntry,
 	computeEditEntry,
+	computeRejectSuggestion,
 	computeSetResolved,
 	computeToggleReaction,
 } from "../editor/edits";
@@ -49,6 +51,9 @@ export class CommentsSidebarView extends ItemView {
 	private scheduleRefresh: Debouncer<[], void>;
 	private filter: FilterMode = "open";
 	private tabs: Array<{ mode: FilterMode; el: HTMLElement; countEl: HTMLElement }> = [];
+	/** Ids of file-level comments (no anchor span) — their thread flares the note
+	 *  title instead of an in-text highlight. Recomputed each refresh. */
+	private fileLevelIds = new Set<string>();
 
 	constructor(
 		leaf: WorkspaceLeaf,
@@ -59,6 +64,7 @@ export class CommentsSidebarView extends ItemView {
 		this.cb = {
 			getAuthor: () => deps.getAuthor(),
 			onHover: (id, active) => this.markDocHighlight(id, active),
+			onHoverEdit: (id, editId, active) => this.markDocEditHighlight(id, editId, active),
 			onClickAnchor: (id) => this.revealAnchor(id),
 			onResize: () => {
 				/* the panel uses normal flow — cards reflow on their own */
@@ -78,6 +84,14 @@ export class CommentsSidebarView extends ItemView {
 			deleteEntry: (id, index) => void this.edit((doc) => computeDeleteEntry(doc, id, index)),
 			toggleReaction: (id, emoji) =>
 				void this.edit((doc) => computeToggleReaction(doc, id, emoji, deps.getAuthor())),
+			acceptSuggestion: (id, editId) =>
+				void this.edit((doc) =>
+					computeAcceptSuggestion(doc, id, editId, deps.getAuthor(), new Date().toISOString()),
+				),
+			rejectSuggestion: (id, editId) =>
+				void this.edit((doc) =>
+					computeRejectSuggestion(doc, id, editId, deps.getAuthor(), new Date().toISOString()),
+				),
 		};
 	}
 
@@ -193,9 +207,16 @@ export class CommentsSidebarView extends ItemView {
 		}
 
 		const all = parseComments(data).filter((c) => c.body);
+		this.fileLevelIds = new Set(all.filter((c) => isFileComment(c)).map((c) => c.id));
 		const open = all.filter((c) => c.status !== "resolved");
 		const resolved = all.filter((c) => c.status === "resolved");
-		const shown = this.filter === "open" ? open : this.filter === "resolved" ? resolved : all;
+		const picked = this.filter === "open" ? open : this.filter === "resolved" ? resolved : all;
+		// File-level comments are about the note as a whole, so list them first —
+		// like a banner — with anchored comments below in document order. The sort is
+		// stable, so each group keeps its document order.
+		const shown = [...picked].sort(
+			(a, b) => Number(this.fileLevelIds.has(b.id)) - Number(this.fileLevelIds.has(a.id)),
+		);
 
 		this.titleEl.setText(file.basename);
 		this.paintTabs({ open: open.length, resolved: resolved.length, all: all.length });
@@ -296,6 +317,15 @@ export class CommentsSidebarView extends ItemView {
 		if (!file) return;
 		const view = this.markdownViewForFile(file);
 		if (!view) return;
+		// File-level comments have no in-text anchor — flare the note title instead.
+		if (this.fileLevelIds.has(id)) {
+			const title = view.containerEl.querySelector(".inline-title");
+			if (title instanceof HTMLElement) {
+				title.scrollIntoView({ block: "center", behavior: "smooth" });
+				this.flash(title);
+			}
+			return;
+		}
 		if (view.getMode() === "preview") {
 			const span = view.containerEl.querySelector(`.doc-comment-span[data-cid="${cssEscape(id)}"]`);
 			if (span instanceof HTMLElement) {
@@ -323,9 +353,36 @@ export class CommentsSidebarView extends ItemView {
 		if (!file) return;
 		const view = this.markdownViewForFile(file);
 		if (!view) return;
+		if (this.fileLevelIds.has(id)) {
+			view.containerEl.querySelectorAll(".inline-title").forEach((t) => t.classList.toggle("is-active", active));
+			return;
+		}
+		const cid = cssEscape(id);
 		view.containerEl
-			.querySelectorAll(`.doc-comment-span[data-cid="${cssEscape(id)}"]`)
+			.querySelectorAll(`.doc-comment-span[data-cid="${cid}"], .doc-comment-edit-span[data-cid="${cid}"]`)
 			.forEach((s) => s.classList.toggle("is-active", active));
+	}
+
+	/** The text cursor in the editor entered/left a comment anchor: light that
+	 *  card (and the specific suggestion row) and scroll it into view — without
+	 *  stealing focus from the editor. */
+	cursorReveal(id: string | null, editId: string | null): void {
+		for (const [cid, card] of this.cards) {
+			card.setActive(cid === id);
+			card.setActiveEdit(cid === id ? editId : null);
+		}
+		if (id) this.cards.get(id)?.el.scrollIntoView({ block: "nearest", behavior: "smooth" });
+	}
+
+	/** Hovering one suggestion row lights just that edit's sub-span in the note.
+	 *  Editor views only — reading view doesn't render edit sub-spans (no-op there). */
+	private markDocEditHighlight(id: string, editId: string, active: boolean): void {
+		const file = this.file;
+		if (!file) return;
+		const view = this.markdownViewForFile(file);
+		if (!view) return;
+		const sel = `.doc-comment-edit-span[data-cid="${cssEscape(id)}"][data-eid="${cssEscape(editId)}"]`;
+		view.containerEl.querySelectorAll(sel).forEach((s) => s.classList.toggle("is-edit-active", active));
 	}
 
 	private flash(span: HTMLElement): void {

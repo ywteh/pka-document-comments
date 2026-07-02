@@ -1,7 +1,7 @@
 import { EditorState, Range, RangeSet, StateField } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView } from "@codemirror/view";
 import { ParsedComment } from "../format/types";
-import { anchorRange, parseComments } from "../format/parse";
+import { anchorRange, editTextRange, parseComments } from "../format/parse";
 
 export type CommentFieldValue = {
 	comments: ParsedComment[];
@@ -65,6 +65,24 @@ const compute = (state: EditorState): CommentFieldValue => {
 			// the underlying text is hidden, so the highlight can't render there.
 			const cls = c.status === "resolved" ? "doc-comment-span is-resolved" : "doc-comment-span";
 			decoRanges.push(Decoration.mark({ class: cls, attributes: { "data-cid": c.id } }).range(r.from, r.to));
+		}
+
+		// Suggested-edit targets: hide their `e:` markers (else they show as raw text)
+		// and paint a sub-highlight over the text each pending edit would change. The
+		// mark keys on data-cid so it lights up with its parent card (see markHighlight).
+		for (const s of c.suggestions) {
+			if (s.open) addHide(s.open.from, s.open.to);
+			if (s.close) addHide(s.close.from, s.close.to);
+			const er = editTextRange(s);
+			if (er && er.to > er.from) {
+				const cls = c.status === "resolved" ? "doc-comment-edit-span is-resolved" : "doc-comment-edit-span";
+				decoRanges.push(
+					Decoration.mark({ class: cls, attributes: { "data-cid": c.id, "data-eid": s.editId } }).range(
+						er.from,
+						er.to,
+					),
+				);
+			}
 		}
 	}
 
