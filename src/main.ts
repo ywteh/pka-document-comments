@@ -3,6 +3,7 @@ import { Result } from "better-result";
 import { EditorView } from "@codemirror/view";
 import { commentField } from "./editor/state";
 import { marginPlugin } from "./editor/margin";
+import { popoverPlugin } from "./editor/popover";
 import { commentConfig } from "./editor/config";
 import { editorLayoutField } from "./editor/layout";
 import { markerDeleteGuard } from "./editor/marker-guard";
@@ -46,8 +47,10 @@ export default class DocCommentsPlugin extends Plugin {
 			editorLayoutField,
 			// The floating margin column needs horizontal room mobile doesn't have, so
 			// there we skip it entirely — comments live in the sidebar, highlights stay,
-			// and new comments are composed in a modal (see startAddComment).
-			...(Platform.isMobile ? [] : [marginPlugin]),
+			// and new comments are composed in a modal (see startAddComment). In its
+			// place, mobile gets the tap-to-open popover: tap an anchored span → its
+			// thread floats just below the anchor; tap elsewhere → it closes.
+			...(Platform.isMobile ? [popoverPlugin] : [marginPlugin]),
 		]);
 
 		// Reading view: a separate render path. Highlights come from a post-processor;
@@ -99,30 +102,35 @@ export default class DocCommentsPlugin extends Plugin {
 
 		this.addCommand({
 			id: "add-comment",
+			icon: "message-square-plus",
 			name: "Add comment on selection",
 			editorCallback: (editor) => this.startAddComment(editor, "selection"),
 		});
 
 		this.addCommand({
 			id: "add-comment-line",
+			icon: "message-square-plus",
 			name: "Add comment on current line",
 			editorCallback: (editor) => this.startAddComment(editor, "line"),
 		});
 
 		this.addCommand({
 			id: "toggle-comments",
+			icon: "message-square",
 			name: "Toggle comments",
 			callback: () => void this.toggleComments(),
 		});
 
 		this.addCommand({
 			id: "toggle-resolved",
+			icon: "message-square-dot",
 			name: "Toggle resolved comments",
 			callback: () => void this.toggleResolved(),
 		});
 
 		this.addCommand({
 			id: "add-comment-reading",
+			icon: "message-square-plus",
 			name: "Add comment on selection (reading view)",
 			checkCallback: (checking) => {
 				const view = this.app.workspace.getActiveViewOfType(MarkdownView);
@@ -134,6 +142,7 @@ export default class DocCommentsPlugin extends Plugin {
 
 		this.addCommand({
 			id: "add-comment-file",
+			icon: "message-square-plus",
 			name: "Add comment on whole file",
 			checkCallback: (checking) => {
 				const file = this.app.workspace.getActiveViewOfType(MarkdownView)?.file;
@@ -145,6 +154,7 @@ export default class DocCommentsPlugin extends Plugin {
 
 		this.addCommand({
 			id: "open-comments-sidebar",
+			icon: "messages-square",
 			name: "Toggle comments sidebar",
 			callback: () => void this.toggleSidebarPanel(),
 		});

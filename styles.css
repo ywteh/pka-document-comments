@@ -710,6 +710,26 @@ body {
 	width: 100%;
 }
 
+/* ── Mobile tap-to-open thread popover ─────────────────────────────────────
+   Tap an anchored span → its thread card floats just below the anchor. The
+   card is the same component as the margin/sidebar, laid out in normal flow. */
+.dc-popover {
+	position: absolute;
+	z-index: 30;
+	width: min(360px, calc(100% - 24px));
+	pointer-events: auto;
+}
+.dc-popover .doc-comment-card {
+	position: static;
+	left: auto;
+	right: auto;
+	width: 100%;
+	box-shadow: var(--shadow-l);
+}
+.dc-popover.dc-offscreen {
+	display: none;
+}
+
 .dc-sidebar__empty {
 	padding: 24px 8px;
 	color: var(--text-muted);
