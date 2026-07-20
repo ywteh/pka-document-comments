@@ -10,8 +10,8 @@ import { describe, expect, test } from "vitest";
 import { EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { commentField } from "../src/editor/state";
-import { draftField } from "../src/editor/draft";
-import { commentConfig } from "../src/editor/config";
+import { draftField, setDraft } from "../src/editor/draft";
+import { commentConfig, CommentConfig } from "../src/editor/config";
 import { editorLayoutField } from "../src/editor/layout";
 
 // Mirror the plugin's real editor extension set (minus the ViewPlugin, which needs
@@ -89,5 +89,74 @@ describe("editor extensions open every note without crashing", () => {
 		);
 		expect(withComment).toContain("dc-has"); // a comment reserves the column
 		expect(withComment).toContain("dc-highlights");
+	});
+
+	// Regression for issue #15: opening the transient "new comment" composer must
+	// NOT reserve the column. It used to toggle `dc-has`, which caps the sizer width
+	// and reflows/re-centers the whole document every time you start (and finish) a
+	// comment. The floating composer overlays the gutter instead.
+	test("an open draft does not reserve the column (no reflow)", () => {
+		const parent = document.body.appendChild(document.createElement("div"));
+		const view = new EditorView({
+			state: EditorState.create({
+				doc: "Just plain text.\nNo comments here.\n",
+				extensions: [commentField, draftField, config, editorLayoutField],
+			}),
+			parent,
+		});
+		view.dispatch({ effects: setDraft.of({ from: 0, to: 4 }) });
+		view.requestMeasure();
+		const className = view.dom.className;
+		view.destroy();
+		expect(className).not.toContain("dc-has"); // draft is a floating overlay, no column reserved
+		expect(className).toContain("dc-highlights"); // highlights still follow the master toggle
+	});
+
+	// Regression for issue #30: once every comment is resolved and resolved are
+	// hidden, their cards are display:none — so the column must NOT stay reserved
+	// over empty space. A `.some()` (not `.every()`) guard keeps a mixed doc reserved.
+	test("resolved-hidden comments don't reserve the empty column", () => {
+		const classesWith = (doc: string, showResolved: boolean): string => {
+			const cfg: CommentConfig = {
+				author: () => "me",
+				showComments: () => true,
+				showResolved: () => showResolved,
+				sidebarOpen: () => false,
+			};
+			const parent = document.body.appendChild(document.createElement("div"));
+			const view = new EditorView({
+				state: EditorState.create({
+					doc,
+					extensions: [commentField, draftField, commentConfig.of(cfg), editorLayoutField],
+				}),
+				parent,
+			});
+			view.dispatch({ changes: { from: 0, insert: "x" } });
+			view.requestMeasure();
+			const cls = view.dom.className;
+			view.destroy();
+			return cls;
+		};
+		const allResolved = [
+			"Done <!--c:r1-->here<!--/c:r1-->.",
+			'<!--co:r1 by:me at:2026-06-17T00:00:00.000Z status:resolved quote:"here"',
+			"me: handled",
+			"-->",
+			"",
+		].join("\n");
+		expect(classesWith(allResolved, false)).not.toContain("dc-has"); // hidden → no column
+		expect(classesWith(allResolved, true)).toContain("dc-has"); // shown → column reserved
+
+		const mixed = [
+			"A <!--c:r1-->one<!--/c:r1--> and <!--c:o1-->two<!--/c:o1-->.",
+			'<!--co:r1 by:me at:2026-06-17T00:00:00.000Z status:resolved quote:"one"',
+			"me: done",
+			"-->",
+			'<!--co:o1 by:me at:2026-06-17T00:00:01.000Z status:open quote:"two"',
+			"me: open",
+			"-->",
+			"",
+		].join("\n");
+		expect(classesWith(mixed, false)).toContain("dc-has"); // the open one still reserves it
 	});
 });

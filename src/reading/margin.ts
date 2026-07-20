@@ -188,7 +188,20 @@ class ReadingMargin {
 		// State classes live on the reading-view container (Obsidian-owned, safe to
 		// write directly), so the stylesheet caps the text column with plain
 		// descendant selectors instead of :has().
-		this.readingView.toggleClass("dc-has", this.comments.length > 0 || !!this.draft);
+		// `dc-has` reserves the column (caps the sizer) and is tied ONLY to persistent
+		// cards — never the transient draft composer. Reserving it for a draft reflowed
+		// (and re-centered) the whole preview every time you opened/closed the composer
+		// (issue #15). `dc-margin` is the lighter "the floating column is present"
+		// signal: it just makes the container position:relative so the absolutely
+		// positioned composer has a containing block (CodeMirror forces this on the
+		// editor, but not on the reading-view element). The composer then floats over
+		// the right gutter without shifting the text. Only a comment whose card
+		// actually renders reserves the column — a resolved card is display:none while
+		// resolved are hidden, so counting it kept the empty column around once every
+		// comment was resolved (issue #30).
+		const hasCards = this.comments.some((c) => this.deps.showResolved() || c.status !== "resolved");
+		this.readingView.toggleClass("dc-has", hasCards);
+		this.readingView.toggleClass("dc-margin", hasCards || !!this.draft);
 		// Highlights show whenever comments are visible anywhere — inline (master
 		// toggle) or in the sidebar panel (you're looking at comments, so the
 		// in-text anchors must light up even with the inline column toggled off).
@@ -343,6 +356,10 @@ class ReadingMargin {
 		this.draftEl?.remove();
 		this.draftEl = null;
 		this.draft = null;
+		// Re-run layout so the composer's `dc-margin` (and its slot in the stack) drops
+		// immediately on cancel — the editor margin gets this from its dispatch cycle;
+		// the reading margin has to ask.
+		this.position();
 	}
 
 	private setActive(id: string | null): void {
@@ -444,7 +461,7 @@ class ReadingMargin {
 		this.readingView.removeEventListener("mousedown", this.onMouseDown);
 		// The container we own goes away; the state classes sit on Obsidian's
 		// reading-view element, so clear them explicitly to avoid leaving it capped.
-		this.readingView.removeClasses(["dc-has", "dc-highlights", "dc-hide-resolved"]);
+		this.readingView.removeClasses(["dc-has", "dc-margin", "dc-highlights", "dc-hide-resolved"]);
 		for (const card of this.cards.values()) card.destroy();
 		this.container.remove();
 		this.cards.clear();
@@ -473,7 +490,7 @@ export class ReadingMarginManager {
 				// text keeps full width). Comments are read/created via the sidebar.
 				rv.toggleClass("dc-highlights", this.deps.showComments());
 				rv.toggleClass("dc-hide-resolved", !this.deps.showResolved());
-				rv.removeClass("dc-has");
+				rv.removeClasses(["dc-has", "dc-margin"]);
 				continue;
 			}
 			let margin = this.margins.get(rv);
